@@ -3,7 +3,7 @@
 .pdm-python
 
 docs/.yarn
-data/
+!data/.gitkeep
 accounts/
 go-cqhttp/
 logs/
