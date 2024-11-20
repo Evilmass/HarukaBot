@@ -1,15 +1,27 @@
 FROM mcr.microsoft.com/playwright/python:v1.22.0-focal
 
-LABEL maintainer="https://github.com/SK-415/HarukaBot"
+ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/
 
-EXPOSE 8080
+EXPOSE 7070
 
-RUN pip install haruka-bot -i https://mirrors.aliyun.com/pypi/simple/
+COPY download_browser.py haruka_bot-1.6.0.post5-py3-none-any.whl /tmp/
+
+RUN sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list && \
+    sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
+
+RUN playwright install-deps && \
+    python /tmp/download_browser.py install && \
+    apt-get clean autoclean && \
+    apt-get autoremove --yes && \
+    rm -rf /var/lib/{apt,dpkg,cache,log}/
+
+# cache pip
+RUN pip install --no-cache-dir /tmp/haruka_bot-1.6.0.post5-py3-none-any.whl -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /haruka_bot
 
-COPY .env.prod /haruka_bot/.env.prod
+COPY . .
 
 ENV TZ=Asia/Shanghai LANG=zh_CN.UTF-8 HOST=0.0.0.0
 
-CMD ["hb" ,"run"]
+CMD ["python" ,"bot.py"]

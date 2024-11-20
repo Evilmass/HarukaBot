@@ -6,14 +6,14 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from nonebot.log import logger
 from aunly_captcha_solver import CaptchaInfer
+from nonebot.log import logger
 from playwright.__main__ import main
-from playwright.async_api import BrowserContext, async_playwright, Page
+from playwright.async_api import BrowserContext, Page, async_playwright
 
 from ..config import plugin_config
-from .fonts_provider import fill_font
 from ..utils import get_path
+from .fonts_provider import fill_font
 
 _browser: Optional[BrowserContext] = None
 mobile_js = Path(__file__).parent.joinpath("mobile.js")
@@ -117,9 +117,7 @@ async def get_dynamic_screenshot_mobile(dynamic_id, page: Page):
     await page.set_viewport_size({"width": 460, "height": 780})
     await page.route(re.compile("^https://static.graiax/fonts/(.+)$"), fill_font)
     if plugin_config.haruka_captcha_address:
-        captcha = CaptchaInfer(
-            plugin_config.haruka_captcha_address, plugin_config.haruka_captcha_token
-        )
+        captcha = CaptchaInfer(plugin_config.haruka_captcha_address, plugin_config.haruka_captcha_token)
         page = await captcha.solve_captcha(page, url)
     else:
         await page.goto(url, wait_until="networkidle")
@@ -144,21 +142,16 @@ async def get_dynamic_screenshot_mobile(dynamic_id, page: Page):
     await page.add_script_tag(path=mobile_js)
 
     await page.evaluate(
-        f'setFont("{plugin_config.haruka_dynamic_font}", '
-        f'"{plugin_config.haruka_dynamic_font_source}")'
+        f'setFont("{plugin_config.haruka_dynamic_font}", ' f'"{plugin_config.haruka_dynamic_font_source}")'
         if plugin_config.haruka_dynamic_font
         else "setFont()"
     )
-    await page.wait_for_function(
-        f"getMobileStyle({'true' if plugin_config.haruka_dynamic_big_image else 'false'})"
-    )
+    await page.wait_for_function(f"getMobileStyle({'true' if plugin_config.haruka_dynamic_big_image else 'false'})")
 
     await page.wait_for_load_state("networkidle")
     await page.wait_for_load_state("domcontentloaded")
 
-    await page.wait_for_timeout(
-        1000 if plugin_config.haruka_dynamic_font_source == "remote" else 200
-    )
+    await page.wait_for_timeout(1000 if plugin_config.haruka_dynamic_font_source == "remote" else 200)
 
     # 判断字体是否加载完成
     need_wait = ["imageComplete", "fontsLoaded"]
@@ -232,9 +225,7 @@ async def check_playwright_env():
         async with async_playwright() as p:
             await p.chromium.launch()
     except Exception:
-        raise ImportError(
-            "加载失败，Playwright 依赖不全，" "解决方法：https://haruka-bot.sk415.icu/faq.html#playwright-依赖不全"
-        )
+        raise ImportError("加载失败，Playwright 依赖不全，" "解决方法：https://haruka-bot.sk415.icu/faq.html#playwright-依赖不全")
 
 
 class Notfound(Exception):

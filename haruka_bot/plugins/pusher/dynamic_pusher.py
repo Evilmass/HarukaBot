@@ -65,9 +65,7 @@ async def dy_sched():
         if len(dynamics) == 1:  # 只有一条动态
             offset[uid] = int(dynamics[0].extend.dyn_id_str)
         else:  # 第一个可能是置顶动态，但置顶也可能是最新一条，所以取前两条的最大值
-            offset[uid] = max(
-                int(dynamics[0].extend.dyn_id_str), int(dynamics[1].extend.dyn_id_str)
-            )
+            offset[uid] = max(int(dynamics[0].extend.dyn_id_str), int(dynamics[1].extend.dyn_id_str))
         return
 
     dynamic = None
@@ -127,9 +125,7 @@ def dynamic_lisener(event):
         return
     job = scheduler.get_job("dynamic_sched")
     if not job:
-        scheduler.add_job(
-            dy_sched, id="dynamic_sched", next_run_time=datetime.now(scheduler.timezone)
-        )
+        scheduler.add_job(dy_sched, id="dynamic_sched", next_run_time=datetime.now(scheduler.timezone))
 
 
 if plugin_config.haruka_dynamic_interval == 0:

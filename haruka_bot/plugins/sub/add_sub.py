@@ -32,7 +32,7 @@ async def _(event: MessageEvent, uid: str = ArgPlainText("uid")):
     name = user and user.name
     if not name:
         try:
-            name = (await get_user_info(uid, reqtype="web", proxies=PROXIES))["name"]
+            name = (await get_user_info(uid, reqtype="web", proxies=PROXIES))["card"]["name"]
         except ResponseCodeError as e:
             if e.code in [-400, -404]:
                 await add_sub.finish("UID不存在，注意UID不是房间号")
@@ -45,9 +45,7 @@ async def _(event: MessageEvent, uid: str = ArgPlainText("uid")):
                 )
 
     if isinstance(event, GuildMessageEvent):
-        await db.add_guild(
-            guild_id=event.guild_id, channel_id=event.channel_id, admin=True
-        )
+        await db.add_guild(guild_id=event.guild_id, channel_id=event.channel_id, admin=True)
     result = await db.add_sub(
         uid=uid,
         type=event.message_type,
@@ -56,7 +54,7 @@ async def _(event: MessageEvent, uid: str = ArgPlainText("uid")):
         name=name,
         # TODO 自定义默认开关
         live=True,
-        dynamic=True,
+        dynamic=False,
         at=False,
     )
     if result:

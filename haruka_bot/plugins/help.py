@@ -17,5 +17,5 @@ async def _():
                 and matcher.__doc__
             ):
                 message += matcher.__doc__ + "\n"
-    message += f"\n当前版本：v{__version__}\n" "详细帮助：https://haruka-bot.sk415.icu/usage/"
+    # message += f"\n当前版本：v{__version__}\n" "详细帮助：https://haruka-bot.sk415.icu/usage/"
     await help.finish(message)

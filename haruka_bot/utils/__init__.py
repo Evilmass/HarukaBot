@@ -1,14 +1,14 @@
 import asyncio
-import sys
-import re
 import contextlib
 import datetime
+import re
+import sys
 from pathlib import Path
 from typing import Union
-from bilireq.utils import get
 
 import httpx
 import nonebot
+from bilireq.utils import get
 from nonebot import on_command as _on_command
 from nonebot import require
 from nonebot.adapters.onebot.v11 import (
@@ -31,7 +31,10 @@ from nonebot.rule import Rule
 from ..config import plugin_config
 
 require("nonebot_plugin_guild_patch")
-from nonebot_plugin_guild_patch import ChannelDestroyedNoticeEvent, GuildMessageEvent  # noqa
+from nonebot_plugin_guild_patch import (  # noqa
+    ChannelDestroyedNoticeEvent,
+    GuildMessageEvent,
+)
 
 
 def get_path(*other):
@@ -126,21 +129,14 @@ async def uid_extract(text: str):
 
 
 async def _guild_admin(bot: Bot, event: GuildMessageEvent):
-    roles = {
-        role["role_name"]
-        for role in (
-            await bot.get_guild_member_profile(guild_id=event.guild_id, user_id=event.user_id)
-        )["roles"]
-    }
+    roles = {role["role_name"] for role in (await bot.get_guild_member_profile(guild_id=event.guild_id, user_id=event.user_id))["roles"]}
     return bool(roles & set(plugin_config.haruka_guild_admin_roles))
 
 
 GUILD_ADMIN: Permission = Permission(_guild_admin)
 
 
-async def permission_check(
-    bot: Bot, event: Union[GroupMessageEvent, PrivateMessageEvent, GuildMessageEvent]
-):
+async def permission_check(bot: Bot, event: Union[GroupMessageEvent, PrivateMessageEvent, GuildMessageEvent]):
     from ..database import DB as db
 
     if isinstance(event, PrivateMessageEvent):
@@ -227,11 +223,8 @@ async def safe_send(bot_id, send_type, type_id, message, at=False):
     if bot is None:
         logger.error(f"推送失败，Bot（{bot_id}）未连接，尝试使用其他 Bot 推送")
         for bot_id, bot in bots.items():
-            if at and (
-                send_type == "guild"
-                or (await bot.get_group_at_all_remain(group_id=type_id))["can_at_all"]
-            ):
-                message = MessageSegment.at("all") + message
+            if at:  # and (send_type == "guild" or (await bot.get_group_at_all_remain(group_id=type_id))["can_at_all"]):
+                message = MessageSegment.at("all") + "\n" + message
             try:
                 result = await _safe_send(bot, send_type, type_id, message)
                 logger.info(f"尝试使用 Bot（{bot_id}）推送成功")
@@ -241,11 +234,8 @@ async def safe_send(bot_id, send_type, type_id, message, at=False):
         logger.error("尝试失败，所有 Bot 均无法推送")
         return
 
-    if at and (
-        send_type == "guild"
-        or (await bot.get_group_at_all_remain(group_id=type_id))["can_at_all"]
-    ):
-        message = MessageSegment.at("all") + message
+    if at:  # and (send_type == "guild" or (await bot.get_group_at_all_remain(group_id=type_id))["can_at_all"]):
+        message = MessageSegment.at("all") + "\n" + message
 
     try:
         return await _safe_send(bot, send_type, type_id, message)
