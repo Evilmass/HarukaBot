@@ -334,7 +334,7 @@ class DB:
         if await cls.get_user(uid=uid):
             sub = await Sub.get(uid=uid).first()
             print(f"uid: {uid}, live_duration: {live_duration}, sub_live_duration: {sub.live_duration}")
-            await Sub.update({"uid": uid}, live_duration=sub.live_duration + live_duration)
+            await Sub.update({"uid": uid}, live_duration=sub.live_duration + int(live_duration))
             return True
         return False
 
