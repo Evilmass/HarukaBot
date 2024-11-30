@@ -52,6 +52,7 @@ class Sub(BaseModel):
     dynamic = BooleanField()  # default=True
     at = BooleanField()  # default=False
     bot_id = IntField()
+    live_duration = IntField()  # 今日直播时长（秒）
 
 
 class User(BaseModel):

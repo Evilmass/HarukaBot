@@ -143,12 +143,8 @@ class DB:
     @classmethod
     async def set_guild_permission(cls, guild_id, channel_id, switch):
         """设置指定频道权限"""
-        if not await cls.add_guild(
-            guild_id=guild_id, channel_id=channel_id, admin=switch
-        ):
-            await Guild.update(
-                {"guild_id": guild_id, "channel_id": channel_id}, admin=switch
-            )
+        if not await cls.add_guild(guild_id=guild_id, channel_id=channel_id, admin=switch):
+            await Guild.update({"guild_id": guild_id, "channel_id": channel_id}, admin=switch)
 
     @classmethod
     async def get_guild(cls, **kwargs):
@@ -183,7 +179,7 @@ class DB:
     @classmethod
     async def add_sub(cls, *, name, **kwargs) -> bool:
         """添加订阅"""
-        if not await Sub.add(**kwargs):
+        if not await Sub.add(live_duration=0, **kwargs):
             return False
         await cls.add_user(uid=kwargs["uid"], name=name)
         if kwargs["type"] == "group":
@@ -287,12 +283,8 @@ class DB:
     async def update_uid_list(cls):
         """更新需要推送的 UP 主列表"""
         subs = Sub.all()
-        uid_list["live"]["list"] = list(
-            set([sub.uid async for sub in subs if sub.live])
-        )
-        uid_list["dynamic"]["list"] = list(
-            set([sub.uid async for sub in subs if sub.dynamic])
-        )
+        uid_list["live"]["list"] = list(set([sub.uid async for sub in subs if sub.live]))
+        uid_list["dynamic"]["list"] = list(set([sub.uid async for sub in subs if sub.dynamic]))
 
         # 清除没有订阅的 offset
         dynamic_offset_keys = set(dynamic_offset)
@@ -315,6 +307,44 @@ class DB:
     async def update_login(cls, tokens):
         """更新登录信息"""
         pass
+
+    @classmethod
+    async def get_live_duration(cls) -> list:
+        res = []
+        subs = await cls.get_subs()
+        for sub in subs:
+            if not sub.live_duration:
+                continue
+            user = await cls.get_user(uid=sub.uid)
+            res.append(
+                {
+                    "user": user.name,
+                    "live_duration": sub.live_duration,
+                }
+            )
+        sorted_res = sorted(res, key=lambda x: x["live_duration"], reverse=True)
+        return sorted_res
+
+    @classmethod
+    async def update_live_duration(cls, uid: int, live_duration: int) -> bool:
+        """
+        只在下播累加时长
+        Model.Update({uid}, **kwargs)
+        """
+        if await cls.get_user(uid=uid):
+            sub = await Sub.get(uid=uid).first()
+            print(f"uid: {uid}, live_duration: {live_duration}, sub_live_duration: {sub.live_duration}")
+            await Sub.update({"uid": uid}, live_duration=sub.live_duration + live_duration)
+            return True
+        return False
+
+    @classmethod
+    async def reset_live_duration(cls) -> bool:
+        subs = await cls.get_subs()
+        for sub in subs:
+            await Sub.update({"uid": sub.uid}, live_duration=0)
+            return True
+        return False
 
 
 get_driver().on_startup(DB.init)

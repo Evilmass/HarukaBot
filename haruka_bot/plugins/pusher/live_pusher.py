@@ -6,15 +6,13 @@ from nonebot.log import logger
 
 from ...config import plugin_config
 from ...database import DB as db
-from ...utils import PROXIES, safe_send, scheduler, calc_time_total
+from ...utils import PROXIES, calc_time_total, safe_send, scheduler
 
 status = {}
 live_time = {}
 
 
-@scheduler.scheduled_job(
-    "interval", seconds=plugin_config.haruka_live_interval, id="live_sched"
-)
+@scheduler.scheduled_job("interval", seconds=plugin_config.haruka_live_interval, id="live_sched")
 async def live_sched():
     # sourcery skip: use-fstring-for-concatenation
     """直播推送"""
@@ -47,20 +45,14 @@ async def live_sched():
             area_parent = info["area_v2_parent_name"]
             room_area = f"{area_parent} / {area}"
             logger.info(f"检测到开播：{name}（{uid}）")
-            live_msg = (
-                f"{name} 开播啦！\n分区：{room_area}\n标题：{title}\n"
-                + MessageSegment.image(cover)
-                + f"\n{url}"
-            )
+            live_msg = f"{name} 开播啦！\n分区：{room_area}\n标题：{title}\n" + MessageSegment.image(cover) + f"\n{url}"
         else:  # 下播
             logger.info(f"检测到下播：{name}（{uid}）")
             if not plugin_config.haruka_live_off_notify:  # 没开下播推送
                 continue
-            live_time_msg = (
-                f"\n本次直播时长 {calc_time_total(time.time() - live_time[uid])}。"
-                if live_time.get(uid)
-                else "。"
-            )
+            live_duration = calc_time_total(time.time() - live_time[uid])
+            await db.update_live_duration(uid=uid, live_duration=live_duration)  # 只在下播累加结算
+            live_time_msg = f"\n本次直播时长 {live_duration}。" if live_time.get(uid) else "。"
             live_msg = f"{name} 下播了{live_time_msg}"
 
         # 推送
