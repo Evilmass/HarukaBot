@@ -17,7 +17,6 @@ async def get_nbw():
     """
     message = "今日耐播王\n"
     res = await db.get_live_duration()
-    max_len = max([len(x["user"]) for x in res])
     for r in res[:3]:
-        message += f'{r["user"].ljust(max_len+1)}{calc_time_total(r["live_duration"])}\n'
+        message += f'{r["user"].ljust(10)}{calc_time_total(r["live_duration"])}\n'
     await live_duration.finish(message)
