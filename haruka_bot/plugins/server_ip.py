@@ -1,11 +1,17 @@
 import aiohttp
-
 from nonebot.matcher import matchers
 
 from ..utils import on_command, to_me
 from ..version import __version__
 
-server_ip = on_command("ip", rule=to_me(), priority=5)
+# 要在 plugins/__init__.py 导入模块
+server_ip = on_command(
+    cmd="ip",
+    aliases={"IP", "服务器"},
+    rule=to_me(),
+    priority=5,
+)
+server_ip.__doc__ = """获取联机服务器地址"""
 
 
 async def fetch(session, url):
@@ -14,7 +20,7 @@ async def fetch(session, url):
 
 
 async def get_server_ip():
-    url = f'https://api.ip.sb/jsonip'
+    url = f"https://api.ip.sb/jsonip"
     async with aiohttp.ClientSession() as session:
         response = await fetch(session, url)
         ip = response.get("ip", "无法获取")
