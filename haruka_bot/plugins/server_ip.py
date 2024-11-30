@@ -20,7 +20,7 @@ async def fetch(session, url):
 
 
 async def get_server_ip():
-    url = f"https://api.ip.sb/jsonip"
+    url = f"https://api-ipv4.ip.sb/ip/jsonip"
     async with aiohttp.ClientSession() as session:
         response = await fetch(session, url)
         ip = response.get("ip", "无法获取")
