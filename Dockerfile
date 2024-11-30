@@ -21,4 +21,5 @@ WORKDIR /haruka_bot
 
 COPY . .
 
-CMD ["python" ,"bot.py"]
+# CMD ["python" ,"bot.py"]s
+CMD ["sleep" ,"infinity"]
