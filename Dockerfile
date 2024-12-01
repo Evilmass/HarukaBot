@@ -12,7 +12,7 @@ EXPOSE 7070
 COPY requirements.txt /tmp/
 
 # cache pip
-RUN pip install --no-cache-dir /tmp/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN pip install --no-cache-dir -r /tmp/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /haruka_bot
 
