@@ -1,3 +1,5 @@
+from nonebot.adapters.onebot.v11.event import MessageEvent
+
 from ..database import DB as db
 from ..utils import calc_time_total, on_command, to_me
 
@@ -11,9 +13,9 @@ live_duration = on_command(
 
 
 @live_duration.handle()
-async def get_nbw():
+async def get_nbw(event: MessageEvent):
     message = "今日耐播王\n"
-    res = await db.get_live_duration()
+    res = await db.get_live_duration(event)
     for r in res[:3]:
         message += f'{r["user"].ljust(10)}{calc_time_total(r["live_duration"])}\n'
     await live_duration.finish(message)
