@@ -1,8 +1,9 @@
 import time
 
-from bilireq.live import get_rooms_info_by_uids
 from nonebot.adapters.onebot.v11.message import MessageSegment
 from nonebot.log import logger
+
+from bilireq.live import get_rooms_info_by_uids
 
 from ...config import plugin_config
 from ...database import DB as db
@@ -26,6 +27,11 @@ async def live_sched():
         return
     for uid, info in res.items():
         new_status = 0 if info["live_status"] == 2 else info["live_status"]
+
+        if info["live_status"] == 1:  # 直播累计时长
+            streaming_duration = int(time.time() - info["live_time"]) / 1000
+            await db.update_live_duration(uid=uid, live_duration=streaming_duration)
+
         if uid not in status:
             status[uid] = new_status
             continue
@@ -51,7 +57,6 @@ async def live_sched():
             if not plugin_config.haruka_live_off_notify:  # 没开下播推送
                 continue
             live_duration = time.time() - live_time[uid]
-            await db.update_live_duration(uid=uid, live_duration=live_duration)  # 只在下播累加结算
             live_time_msg = f"\n本次直播时长 {calc_time_total(live_duration)}。" if live_time.get(uid) else "。"
             live_msg = f"{name} 下播了{live_time_msg}"
 
