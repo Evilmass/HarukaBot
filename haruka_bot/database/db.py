@@ -3,13 +3,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from nonebot import get_driver
-from nonebot.adapters.onebot.v11.event import MessageEvent
 from nonebot.log import logger
 from packaging.version import Version as version_parser
 from tortoise import Tortoise
 from tortoise.connection import connections
 
-from ..utils import get_path, get_type_id
+from ..utils import get_path
 from ..version import VERSION as HBVERSION
 from .models import Group, Guild, Sub, User, Version
 
@@ -310,7 +309,7 @@ class DB:
         pass
 
     @classmethod
-    async def get_live_duration(cls, event: MessageEvent) -> list:
+    async def get_live_duration(cls) -> list:
 
         def unique_and_sort_dicts(dict_list, unique_field, sort_field):
             unique_dict = {}
@@ -319,13 +318,14 @@ class DB:
             return sorted(list(unique_dict.values()), key=lambda x: x[sort_field], reverse=True)
 
         res = []
-        subs = await cls.get_sub_list(event.message_type, await get_type_id(event))
+        subs = await cls.get_subs()
         for sub in subs:
             if not sub.live_duration:
                 continue
             user = await cls.get_user(uid=sub.uid)
             res.append(
                 {
+                    "uid": sub.uid,
                     "user": user.name,
                     "live_duration": sub.live_duration,
                 }
