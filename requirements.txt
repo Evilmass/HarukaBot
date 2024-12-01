@@ -1,5 +1,5 @@
 aiosqlite==0.17.0
-anyio==4.6.2.post1
+anyio==4.6.2
 APScheduler==3.11.0
 async-timeout==5.0.1
 asyncpg==0.30.0
