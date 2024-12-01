@@ -12,9 +12,6 @@ live_duration = on_command(
 
 @live_duration.handle()
 async def get_nbw():
-    """
-    统计前三个
-    """
     message = "今日耐播王\n"
     res = await db.get_live_duration()
     for r in res[:3]:

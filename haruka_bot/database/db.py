@@ -310,6 +310,13 @@ class DB:
 
     @classmethod
     async def get_live_duration(cls) -> list:
+
+        def unique_and_sort_dicts(dict_list, unique_field, sort_field):
+            unique_dict = {}
+            for d in dict_list:
+                unique_dict[d[unique_field]] = d
+            return sorted(list(unique_dict.values()), key=lambda x: x[sort_field], reverse=True)
+
         res = []
         subs = await cls.get_subs()
         for sub in subs:
@@ -322,7 +329,7 @@ class DB:
                     "live_duration": sub.live_duration,
                 }
             )
-        sorted_res = sorted(res, key=lambda x: x["live_duration"], reverse=True)
+        sorted_res = unique_and_sort_dicts(res, unique_field="user", sort_field="live_duration")
         return sorted_res
 
     @classmethod
