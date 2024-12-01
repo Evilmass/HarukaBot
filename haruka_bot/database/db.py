@@ -334,13 +334,22 @@ class DB:
         return sorted_res
 
     @classmethod
-    async def update_live_duration(cls, uid: int, live_duration: int) -> bool:
+    async def update_live_duration(cls, uid: int, live_duration: int = 0, stop_live: bool = False) -> bool:
         """
         Model.Update({uid}, **kwargs)
         """
         if await cls.get_user(uid=uid):
             sub = await Sub.get(uid=uid).first()
-            await Sub.update({"uid": uid}, live_duration=sub.live_duration + int(live_duration))
+            if stop_live:  # 下播
+                await Sub.update(
+                    {"uid": uid},
+                    live_duration=sub.live_duration + live_duration,
+                )
+            else:  # 直播中累加时长
+                await Sub.update(
+                    {"uid": uid},
+                    live_duration=live_duration,
+                )
             return True
         return False
 

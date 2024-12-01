@@ -29,8 +29,9 @@ async def live_sched():
         new_status = 0 if info["live_status"] == 2 else info["live_status"]
 
         if info["live_status"] == 1:  # 直播累计时长
-            streaming_duration = int(time.time() - info["live_time"]) / 1000
-            await db.update_live_duration(uid=uid, live_duration=streaming_duration)
+            live_duration = int(time.time() - info["live_time"])
+            await db.update_live_duration(uid=uid, live_duration=live_duration)
+            # print(f'name: {await db.get_name(uid)}, {time.time() - info["live_time"]}s')
 
         if uid not in status:
             status[uid] = new_status
@@ -59,6 +60,11 @@ async def live_sched():
             live_duration = time.time() - live_time[uid]
             live_time_msg = f"\n本次直播时长 {calc_time_total(live_duration)}。" if live_time.get(uid) else "。"
             live_msg = f"{name} 下播了{live_time_msg}"
+            await db.update_live_duration(
+                uid=uid,
+                live_duration=int(live_duration),
+                stop_live=True,
+            )
 
         # 推送
         push_list = await db.get_push_list(uid, "live")

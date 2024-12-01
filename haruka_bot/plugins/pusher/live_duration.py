@@ -11,7 +11,7 @@ live_time = {}
 @scheduler.scheduled_job("cron", hour=0, minute=0, seconds=0, id="notify_live_duration")
 async def notify_live_duration(event: MessageEvent):
     """
-    每天12点通知一次
+    每天0点通知一次
     """
     await get_nbw(event)
 
