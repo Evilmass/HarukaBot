@@ -16,4 +16,5 @@ async def reset_live_duration():
 @scheduler.scheduled_job("cron", second="*/10", id="test")
 async def test():
     # await db.reset_live_duration()
-    await get_live_duration(cron=True)
+    # await get_live_duration(cron=True)
+    pass
