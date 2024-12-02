@@ -6,11 +6,11 @@ from ..version import __version__
 # 要在 plugins/__init__.py 导入模块
 server_ip = on_command(
     cmd="ip",
-    aliases={"IP", "服务器", "联机ip", "服务器ip"},
+    aliases={"IP", "联机ip", "服务器ip"},
     rule=to_me(),
     priority=5,
 )
-server_ip.__doc__ = """获取联机服务器地址（ip|IP|联机ip|服务器|服务器ip）"""
+server_ip.__doc__ = """获取联机服务器地址（ip|IP|联机ip|服务器ip）"""
 
 server_ip.handle()(permission_check)
 
