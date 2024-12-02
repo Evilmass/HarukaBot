@@ -1,7 +1,6 @@
 import aiohttp
-from nonebot.matcher import matchers
 
-from ..utils import on_command, to_me
+from ..utils import on_command, permission_check, to_me
 from ..version import __version__
 
 # 要在 plugins/__init__.py 导入模块
@@ -12,6 +11,8 @@ server_ip = on_command(
     priority=5,
 )
 server_ip.__doc__ = """获取联机服务器地址"""
+
+server_ip.handle()(permission_check)
 
 
 async def fetch(session, url):

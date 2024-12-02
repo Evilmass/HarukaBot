@@ -1,7 +1,7 @@
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 
 from ..database import DB as db
-from ..utils import get_type_id, on_command, to_me
+from ..utils import get_type_id, on_command, permission_check, to_me
 
 # 要在 plugins/__init__.py 导入模块
 live_duration = on_command(
@@ -10,6 +10,9 @@ live_duration = on_command(
     rule=to_me(),
     priority=5,
 )
+live_duration.__doc__ = """获取今日耐播王"""
+
+live_duration.handle()(permission_check)
 
 
 @live_duration.handle()
