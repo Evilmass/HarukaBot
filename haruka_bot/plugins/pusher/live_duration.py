@@ -6,7 +6,8 @@ from ...utils import scheduler
 bots = nonebot.get_bots()
 
 
-@scheduler.scheduled_job("cron", hour=0, minute=0, second=0, timezone="Asia/Shanghai", id="get_live_duration")
+# id 和 函数名要一致
+@scheduler.scheduled_job("cron", hour=0, minute=0, second=0, timezone="Asia/Shanghai", id="notify_live_duration")
 async def notify_live_duration():
     message_list = await db.get_live_duration()
     for ml in message_list:
