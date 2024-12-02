@@ -1,7 +1,7 @@
-from typing import Optional
+from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 
 from ..database import DB as db
-from ..utils import calc_time_total, on_command, safe_send, to_me
+from ..utils import get_type_id, on_command, to_me
 
 # 要在 plugins/__init__.py 导入模块
 live_duration = on_command(
@@ -13,20 +13,9 @@ live_duration = on_command(
 
 
 @live_duration.handle()
-async def get_live_duration(cron: Optional[bool] = False):
-    message = "今日耐播王\n"
-    res = await db.get_live_duration()
-    for r in res[:3]:
-        message += f'{r["user"].ljust(10)}{calc_time_total(r["live_duration"])}\n'
-    if not cron:
-        await live_duration.finish(message)
-    else:
-        sub = await db.get_sub()
-        await safe_send(
-            bot_id=sub.bot_id,
-            send_type=sub.type,
-            type_id=sub.type_id,
-            message=message,
-            at=bool(sub.at),
-        )
-    return message
+async def get_live_duration(event: GroupMessageEvent):
+    message_list = await db.get_live_duration()
+    for ml in message_list:
+        if ml["group_id"] == await get_type_id(event):
+            await live_duration.finish(ml["message"])
+            break

@@ -8,7 +8,6 @@ from typing import Union
 
 import httpx
 import nonebot
-from bilireq.utils import get
 from nonebot import on_command as _on_command
 from nonebot import require
 from nonebot.adapters.onebot.v11 import (
@@ -28,13 +27,12 @@ from nonebot.params import ArgPlainText, CommandArg, RawCommand
 from nonebot.permission import SUPERUSER, Permission
 from nonebot.rule import Rule
 
+from bilireq.utils import get
+
 from ..config import plugin_config
 
 require("nonebot_plugin_guild_patch")
-from nonebot_plugin_guild_patch import (  # noqa
-    ChannelDestroyedNoticeEvent,
-    GuildMessageEvent,
-)
+from nonebot_plugin_guild_patch import ChannelDestroyedNoticeEvent, GuildMessageEvent
 
 
 def get_path(*other):

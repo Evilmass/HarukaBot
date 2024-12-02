@@ -8,7 +8,7 @@ from packaging.version import Version as version_parser
 from tortoise import Tortoise
 from tortoise.connection import connections
 
-from ..utils import get_path
+from ..utils import calc_time_total, get_path
 from ..version import VERSION as HBVERSION
 from .models import Group, Guild, Sub, User, Version
 
@@ -309,29 +309,60 @@ class DB:
         pass
 
     @classmethod
-    async def get_live_duration(cls) -> list:
-
-        def unique_and_sort_dicts(dict_list, unique_field, sort_field):
-            unique_dict = {}
-            for d in dict_list:
-                unique_dict[d[unique_field]] = d
-            return sorted(list(unique_dict.values()), key=lambda x: x[sort_field], reverse=True)
-
+    async def get_live_duration(cls) -> List[Dict[str, str]]:
+        """
+        top_live_durations
+        {
+            100: [
+                {"uid": 1, "group_id": 100, "bot_id": 999, "user": "user1", "live_duration": 9639},
+                {"uid": 2, "group_id": 100, "bot_id": 999, "user": "user2", "live_duration": 3390},
+            ],
+            200: [{"uid": 3, "group_id": 200, "bot_id": 999, "user": "user3", "live_duration": 29674}],
+        }
+        """
+        # 获取所有订阅列表
         res = []
         subs = await cls.get_subs()
         for sub in subs:
-            if not sub.live_duration:
-                continue
             user = await cls.get_user(uid=sub.uid)
             res.append(
                 {
                     "uid": sub.uid,
+                    "group_id": sub.type_id,
+                    "bot_id": sub.bot_id,
                     "user": user.name,
                     "live_duration": sub.live_duration,
                 }
             )
-        sorted_res = unique_and_sort_dicts(res, unique_field="user", sort_field="live_duration")
-        return sorted_res
+
+        # 创建一个空字典来存储按group_id分组的数据
+        grouped_data = {}
+
+        # 遍历原始数据，按group_id分组
+        for item in res:
+            group_id = item["group_id"]
+            if group_id not in grouped_data:
+                grouped_data[group_id] = []
+            grouped_data[group_id].append(item)
+
+        # 对每个group_id对应的列表按live_duration降序排序，并取前三个
+        top_live_durations = {}
+        for group_id, items in grouped_data.items():
+            # 按live_duration降序排序
+            sorted_items = sorted(items, key=lambda x: x["live_duration"], reverse=True)
+            # 取前三个
+            top_live_durations[group_id] = sorted_items[:3]
+
+        # 发送到不同群聊
+        message_list = []
+        message = "今日耐播王\n"
+        for group_id, top_items in top_live_durations.items():
+            for item in top_items:
+                message += f'{item["user"].ljust(10)}{calc_time_total(item["live_duration"])}\n'
+            message_list.append({"group_id": group_id, "bot_id": item["bot_id"], "message": message})
+            message = "今日耐播王\n"  # 重置消息头
+
+        return message_list
 
     @classmethod
     async def update_live_duration(cls, uid: int, live_duration: int = 0, stop_live: bool = False) -> bool:
@@ -354,12 +385,10 @@ class DB:
         return False
 
     @classmethod
-    async def reset_live_duration(cls) -> bool:
+    async def reset_live_duration(cls):
         subs = await cls.get_subs()
         for sub in subs:
             await Sub.update({"uid": sub.uid}, live_duration=0)
-            return True
-        return False
 
 
 get_driver().on_startup(DB.init)
