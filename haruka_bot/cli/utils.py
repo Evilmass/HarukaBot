@@ -11,6 +11,7 @@ env = {
     "SUPERUSERS": [],
     "COMMAND_START": [""],
     "HARUKA_DIR": "./data/",
+    "IGNORE_GROUP_ID": 1,
 }
 
 
@@ -27,9 +28,7 @@ def create_env():
 
     while True:
         try:
-            superusers = click.prompt(
-                "主人QQ号 (多个使用空格分开)", default="", show_default=False
-            )
+            superusers = click.prompt("主人QQ号 (多个使用空格分开)", default="", show_default=False)
             superusers = [int(superuser) for superuser in superusers.split()]
             env["SUPERUSERS"] = superusers
             break
