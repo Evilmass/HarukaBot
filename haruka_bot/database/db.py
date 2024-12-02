@@ -350,8 +350,8 @@ class DB:
         for group_id, items in grouped_data.items():
             # 按live_duration降序排序
             sorted_items = sorted(items, key=lambda x: x["live_duration"], reverse=True)
-            # 取前三个
-            top_live_durations[group_id] = sorted_items[:3]
+            # 取前八个
+            top_live_durations[group_id] = sorted_items[:8]
 
         # 发送到不同群聊
         message_list = []
