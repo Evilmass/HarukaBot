@@ -10,7 +10,7 @@ live_duration = on_command(
     rule=to_me(),
     priority=5,
 )
-live_duration.__doc__ = """获取今日耐播王"""
+live_duration.__doc__ = """获取今日耐播王（nbw|耐播王）"""
 
 live_duration.handle()(permission_check)
 
