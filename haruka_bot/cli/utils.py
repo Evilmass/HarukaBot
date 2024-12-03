@@ -13,10 +13,11 @@ env = {
     "HARUKA_DIR": "./data/",
     "IGNORE_GROUP_ID": 1,
 }
+env_file = ".env.prod"
 
 
 def create_env():
-    file_path = Path("./.env.prod").resolve()
+    file_path = Path(f"./{env_file}").resolve()
     if file_path.exists():
         return
 
@@ -35,7 +36,7 @@ def create_env():
         except ValueError:
             print("输入格式有误，请重新输入")
 
-    with open(".env.prod", "w"):
+    with open(f"{env_file}", "w"):
         pass
 
     for key, value in env.items():
