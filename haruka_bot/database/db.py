@@ -361,7 +361,7 @@ class DB:
         message = "今日耐播王\n"
         for group_id, top_items in top_live_durations.items():
             for item in top_items:
-                message += f'{item["user"].ljust(10)}{calc_time_total(item["live_duration"])}\n'
+                message += f'{item["user"].ljust(15)}|{calc_time_total(item["live_duration"])}\n'
             message_list.append({"group_id": group_id, "bot_id": item["bot_id"], "message": message})
             message = "今日耐播王\n"  # 重置消息头
 
