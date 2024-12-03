@@ -325,15 +325,18 @@ class DB:
         subs = await cls.get_subs()
         for sub in subs:
             user = await cls.get_user(uid=sub.uid)
-            res.append(
-                {
-                    "uid": sub.uid,
-                    "group_id": sub.type_id,
-                    "bot_id": sub.bot_id,
-                    "user": user.name,
-                    "live_duration": sub.live_duration,
-                }
-            )
+            if sub.live_duration:
+                res.append(
+                    {
+                        "uid": sub.uid,
+                        "group_id": sub.type_id,
+                        "bot_id": sub.bot_id,
+                        "user": user.name,
+                        "live_duration": sub.live_duration,
+                    }
+                )
+        if not res:
+            return []
 
         # 创建一个空字典来存储按group_id分组的数据
         grouped_data = {}
