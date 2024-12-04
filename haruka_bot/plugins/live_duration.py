@@ -17,8 +17,10 @@ live_duration.handle()(permission_check)
 
 @live_duration.handle()
 async def get_live_duration(event: GroupMessageEvent):
-    message_list = await db.get_live_duration()
-    for ml in message_list:
-        if ml["group_id"] == await get_type_id(event):
-            await live_duration.finish(ml["message"])
-            break
+    if message_list := await db.get_live_duration():
+        for ml in message_list:
+            if ml["group_id"] == await get_type_id(event):
+                await live_duration.finish(ml["message"])
+                break
+    else:
+        await live_duration.finish("今日暂无耐播王")
