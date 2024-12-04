@@ -336,7 +336,7 @@ class DB:
                     }
                 )
         if not res:
-            return []
+            return
 
         # 创建一个空字典来存储按group_id分组的数据
         grouped_data = {}
