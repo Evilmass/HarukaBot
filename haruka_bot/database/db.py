@@ -368,16 +368,22 @@ class DB:
         return message_list
 
     @classmethod
-    async def update_live_duration(cls, uid: int, live_duration: int = 0) -> bool:
+    async def update_live_duration(cls, uid: int, live_duration: int = 0, stop_live: bool = False) -> bool:
         """
         Model.Update({uid}, **kwargs)
         """
         if await cls.get_user(uid=uid):
             sub = await Sub.get(uid=uid).first()
-            await Sub.update(
-                {"uid": uid},
-                live_duration=sub.live_duration + live_duration,
-            )
+            if stop_live:
+                await Sub.update(
+                    {"uid": uid},
+                    live_duration=live_duration,
+                )
+            else:  
+                await Sub.update(
+                    {"uid": uid},
+                    live_duration=sub.live_duration + live_duration,
+                )
             return True
         return False
 

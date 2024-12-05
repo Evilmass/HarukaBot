@@ -23,5 +23,5 @@ async def get_live_duration(event: GroupMessageEvent):
                 await live_duration.finish(ml["message"])
                 break
     else:
-        print("no more live streaming")
+        print("no streaming")
         await live_duration.finish("今日暂无耐播王")
