@@ -1,0 +1,25 @@
+version: '3.2'
+services:
+  qqbot:
+    #image: qqbot:latest  # docker build -t qqbot:latest .
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    container_name: qqbot
+    volumes:
+      - ./data:/app/data
+      - ./haruka_bot:/app/haruka_bot
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./env.prod:/app/.env.prod  # cp .env.example .env.prod
+      - ./bot.py:/app/bot.py
+    environment:
+      TZ: "Asia/Shanghai"
+      HOST: "0.0.0.0"
+    networks:
+      - ip6net
+    ports:
+      - 7070:7070
+    command: "python bot.py"
+networks:
+  ip6net:
+    external: true
