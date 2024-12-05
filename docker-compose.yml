@@ -10,7 +10,7 @@ services:
       - ./data:/app/data
       - ./haruka_bot:/app/haruka_bot
       - ./pyproject.toml:/app/pyproject.toml
-      - ./env.prod:/app/.env.prod  # cp .env.example .env.prod
+      - ./.env.prod:/app/.env.prod  # cp .env.example .env.prod
       - ./bot.py:/app/bot.py
     environment:
       TZ: "Asia/Shanghai"
