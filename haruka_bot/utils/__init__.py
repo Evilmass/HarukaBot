@@ -4,11 +4,11 @@ import datetime
 import re
 import sys
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import httpx
 import nonebot
-from bilireq.utils import get
+from bilireq.utils import get, post
 from nonebot import on_command as _on_command
 from nonebot import require
 from nonebot.adapters.onebot.v11 import (
@@ -104,6 +104,46 @@ async def get_room_id(uid: int) -> int:
     resp = await get(url, params=data)
     logger.debug(resp)
     return resp.get("room_id", 0)
+
+
+async def get_short_url(
+    oid: int | None = None,
+    share_origin: Optional[str] = "vertical-three-point-panel",
+    share_mode: int | None = 3,
+    share_id: Optional[str] = "live.live-room-detail.0.0.pv",
+    platform: Optional[str] = "android",
+    buvid: Optional[str] = "qwq",
+    share_channel: Optional[str] = "COPY",
+) -> str:
+    """
+    ref
+        https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/b23tv.md
+        https://github.com/Nemo2011/bilibili-api/pull/720
+
+    share_id
+        video: main.ugc-video-detail.0.0.pv
+        live: live.live-room-detail.0.0.pv
+    """
+    post_data = {
+        "oid": oid,
+        "build": 7300400,
+        "buvid": buvid,
+        "platform": platform,
+        "share_channel": share_channel,
+        "share_mode": share_mode,
+        "share_origin": share_origin,  # live
+        "share_id": share_id,  # live
+    }
+
+    api_url = "https://api.biliapi.net/x/share/click"
+    response = await post(api_url, data=post_data)
+    # print(([response, type(response)]))
+    if not response.get("content", ""):
+        msg = f"无法解析 {oid}"
+        shrot_url = msg
+    else:
+        shrot_url = re.findall(r"https?://\S+", response["content"])[0]
+    return shrot_url
 
 
 async def uid_extract(text: str):
