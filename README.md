@@ -47,3 +47,7 @@ HarukaBot 针对不同的推送场景（粉丝群、娱乐群、直播通知群�
 
 ## 许可证
 本项目使用 [GNU AGPLv3](https://choosealicense.com/licenses/agpl-3.0/) 作为开源许可证。
+
+
+## websocket-client
+ws://127.0.0.1:7070/onebot/v11/ws

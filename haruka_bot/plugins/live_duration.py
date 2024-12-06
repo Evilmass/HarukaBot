@@ -10,13 +10,13 @@ live_duration = on_command(
     rule=to_me(),
     priority=5,
 )
-live_duration.__doc__ = """获取今日耐播王（nbw|耐播王）"""
+live_duration.__doc__ = """耐播王 -> nbw"""
 
 live_duration.handle()(permission_check)
 
 
 @live_duration.handle()
-async def get_live_duration(event: GroupMessageEvent):
+async def _(event: GroupMessageEvent):
     if message_list := await db.get_live_duration():
         for ml in message_list:
             if ml["group_id"] == await get_type_id(event):

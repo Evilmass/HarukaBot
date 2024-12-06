@@ -8,6 +8,7 @@ from typing import Union
 
 import httpx
 import nonebot
+from bilireq.utils import get
 from nonebot import on_command as _on_command
 from nonebot import require
 from nonebot.adapters.onebot.v11 import (
@@ -26,8 +27,6 @@ from nonebot.matcher import Matcher
 from nonebot.params import ArgPlainText, CommandArg, RawCommand
 from nonebot.permission import SUPERUSER, Permission
 from nonebot.rule import Rule
-
-from bilireq.utils import get
 
 from ..config import plugin_config
 
@@ -94,6 +93,17 @@ async def search_user(keyword: str):
     resp = await get(url, params=data)
     logger.debug(resp)
     return resp
+
+
+async def get_room_id(uid: int) -> int:
+    """
+    获取用户直播间id
+    """
+    url = "https://api.live.bilibili.com/live_user/v1/Master/info?uid=11417094"
+    data = {"uid": uid}
+    resp = await get(url, params=data)
+    logger.debug(resp)
+    return resp.get("room_id", 0)
 
 
 async def uid_extract(text: str):

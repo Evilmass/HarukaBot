@@ -54,6 +54,11 @@ class DB:
         return await User.get(**kwargs).first()
 
     @classmethod
+    async def get_users(cls, **kwargs):
+        """获取所以 UP 主信息"""
+        return await User.get(**kwargs).all()
+
+    @classmethod
     async def get_name(cls, uid) -> Optional[str]:
         """获取 UP 主昵称"""
         user = await cls.get_user(uid=uid)
@@ -80,6 +85,14 @@ class DB:
         """更新 UP 主信息"""
         if await cls.get_user(uid=uid):
             await User.update({"uid": uid}, name=name)
+            return True
+        return False
+
+    @classmethod
+    async def update_user_info(cls, uid: int, data: dict) -> bool:
+        """更新 UP 主信息"""
+        if await cls.get_user(uid=uid):
+            await User.update({"uid": uid}, **data)
             return True
         return False
 
@@ -379,7 +392,7 @@ class DB:
                     {"uid": uid},
                     live_duration=live_duration,
                 )
-            else:  
+            else:
                 await Sub.update(
                     {"uid": uid},
                     live_duration=sub.live_duration + live_duration,

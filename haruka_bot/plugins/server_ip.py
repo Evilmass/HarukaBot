@@ -10,12 +10,12 @@ server_ip = on_command(
     rule=to_me(),
     priority=5,
 )
-server_ip.__doc__ = """获取联机服务器地址（ip|IP|联机ip|服务器ip）"""
+server_ip.__doc__ = """获取联机服务器地址 -> ip"""
 
 server_ip.handle()(permission_check)
 
 
-async def fetch(session, url):
+async def fetch(session: aiohttp.ClientSession, url: str) -> dict:
     async with session.get(url) as response:
         return await response.json()
 

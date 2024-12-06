@@ -58,6 +58,7 @@ class Sub(BaseModel):
 class User(BaseModel):
     uid = IntField(pk=True)
     name = CharField(max_length=20)
+    room_id = IntField()
 
 
 class Group(BaseModel):

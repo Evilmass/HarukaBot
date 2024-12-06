@@ -1,8 +1,6 @@
-from nonebot.adapters import MessageTemplate
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 
-from ..database import DB as db
 from ..utils import on_command, permission_check, to_me
 
 # 要在 plugins/__init__.py 导入模块
@@ -12,12 +10,12 @@ test_handler = on_command(
     rule=to_me(),
     priority=5,
 )
-test_handler.__doc__ = """测试"""
+# test_handler.__doc__ = """测试"""
 
 test_handler.handle()(permission_check)
 
 
-@test_handler.handle()
+# @test_handler.handle()
 async def get_test_handler(event: GroupMessageEvent):
     # message_list = await db.get_test_handler()
     # for ml in message_list:

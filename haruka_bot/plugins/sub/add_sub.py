@@ -7,6 +7,7 @@ from nonebot_plugin_guild_patch import GuildMessageEvent
 from ...database import DB as db
 from ...utils import (
     PROXIES,
+    get_room_id,
     get_type_id,
     handle_uid,
     on_command,
@@ -46,6 +47,7 @@ async def _(event: MessageEvent, uid: str = ArgPlainText("uid")):
 
     if isinstance(event, GuildMessageEvent):
         await db.add_guild(guild_id=event.guild_id, channel_id=event.channel_id, admin=True)
+
     result = await db.add_sub(
         uid=uid,
         type=event.message_type,
@@ -57,6 +59,11 @@ async def _(event: MessageEvent, uid: str = ArgPlainText("uid")):
         dynamic=False,
         at=False,
     )
+
+    # room_id
+    room_id = await get_room_id(uid)
+    await db.update_user_info(uid, data={"room_id": room_id})
+
     if result:
         await add_sub.finish(f"已关注 {name}（{uid}）")
     await add_sub.finish(f"{name}（{uid}）已经关注了")
