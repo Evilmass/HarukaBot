@@ -24,7 +24,7 @@ async def _(event: MessageEvent):
     subs = await db.get_sub_list(event.message_type, await get_type_id(event))
     if now_live := [sub for sub in subs if status.get(str(sub.uid)) == 1]:
         message = f"共有{len(now_live)}个主播正在直播：\n\n"
-        for sub in subs:
+        for sub in now_live:
             name = await db.get_name(sub.uid)
             if not name:
                 continue
