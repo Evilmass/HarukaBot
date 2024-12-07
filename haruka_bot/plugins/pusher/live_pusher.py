@@ -1,13 +1,12 @@
 import time
 
+from bilireq.live import get_rooms_info_by_uids
 from nonebot.adapters.onebot.v11.message import MessageSegment
 from nonebot.log import logger
 
-from bilireq.live import get_rooms_info_by_uids
-
 from ...config import plugin_config
 from ...database import DB as db
-from ...utils import PROXIES, calc_time_total, safe_send, scheduler
+from ...utils import PROXIES, calc_time_total, get_short_url, safe_send, scheduler
 
 status = {}
 live_time = {}
@@ -25,6 +24,7 @@ async def live_sched():
     res = await get_rooms_info_by_uids(uids, reqtype="web", proxies=PROXIES)
     if not res:
         return
+
     for uid, info in res.items():
         new_status = 0 if info["live_status"] == 2 else info["live_status"]
 

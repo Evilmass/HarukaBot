@@ -139,8 +139,7 @@ async def get_short_url(
     response = await post(api_url, data=post_data)
     # print(([response, type(response)]))
     if not response.get("content", ""):
-        msg = f"无法解析 {oid}"
-        shrot_url = msg
+        shrot_url = f"无法解析"
     else:
         shrot_url = re.findall(r"https?://\S+", response["content"])[0]
     return shrot_url
@@ -201,7 +200,7 @@ async def permission_check(bot: Bot, event: Union[GroupMessageEvent, PrivateMess
             return
         if await (GUILD_ADMIN | SUPERUSER)(bot, event):
             return
-    await bot.send(event, "权限不足，目前只有管理员才能使用")
+    # await bot.send(event, "权限不足，目前只有管理员才能使用")
     raise FinishedException
 
 

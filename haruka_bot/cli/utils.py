@@ -11,7 +11,6 @@ env = {
     "SUPERUSERS": [],
     "COMMAND_START": [""],
     "HARUKA_DIR": "./data/",
-    "IGNORE_GROUP_ID": 1,
 }
 env_file = ".env.prod"
 
