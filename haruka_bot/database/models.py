@@ -59,7 +59,7 @@ class User(BaseModel):
     uid = IntField(pk=True)
     name = CharField(max_length=20)
     room_id = IntField()
-    short_url = CharField(max_length=22, default="")
+    short_url = CharField(max_length=22)
 
 
 class Group(BaseModel):

@@ -54,6 +54,7 @@ async def _(event: MessageEvent, uid: str = ArgPlainText("uid")):
         type_id=await get_type_id(event),
         bot_id=event.self_id,
         name=name,
+        short_url="",
         # TODO 自定义默认开关
         live=True,
         dynamic=False,
