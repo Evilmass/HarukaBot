@@ -31,5 +31,5 @@ async def get_server_ip():
 @server_ip.handle()
 async def _():
     _server_ip = await get_server_ip()
-    message = f"服务器IP ：{_server_ip}\n密码：1145\nCitra端口：50005\nYuzu端口：24872"
+    message = f"服务器IP ：{_server_ip}\n密码：1145\nCitra端口：50005\nYuzu端口：24872\nYuzu私服端口：24873，密码：1145"
     await server_ip.finish(message)
