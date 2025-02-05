@@ -1,4 +1,5 @@
 version: '3.2'
+
 services:
   qqbot:
     #image: qqbot:latest  # docker build -t qqbot:latest .
@@ -6,6 +7,7 @@ services:
       context: ./
       dockerfile: Dockerfile
     container_name: qqbot
+    restart: always
     volumes:
       - ./data:/app/data
       - ./haruka_bot:/app/haruka_bot
@@ -19,7 +21,20 @@ services:
       - ip6net
     ports:
       - 7070:7070
-    command: "python bot.py"
+    # command: "python bot.py"
+    command: "sleep infinity"
+
+  # redis:
+  #   image: redis:7.2.4-alpine
+  #   restart: always
+  #   networks:
+  #     - ip6net
+  #   ports:
+  #     - 6379:6379
+  #   command: redis-server --save 20 1 --loglevel warning
+  #   volumes:
+  #     - redsi_data:/data
+
 networks:
   ip6net:
     external: true
