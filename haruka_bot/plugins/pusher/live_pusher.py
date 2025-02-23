@@ -28,9 +28,9 @@ async def live_sched():
     for uid, info in res.items():
         new_status = 0 if info["live_status"] == 2 else info["live_status"]
 
-        if info["live_status"] == 1:  # 直播累计时长
-            await db.update_live_duration(uid=uid, live_duration=plugin_config.haruka_live_interval)
-            # print(f'name: {await db.get_name(uid)}, {time.time() - info["live_time"]}s')
+        # if info["live_status"] == 1:  # 直播累计时长
+        # await db.update_live_duration(uid=uid, live_duration=plugin_config.haruka_live_interval)
+        # print(f'name: {await db.get_name(uid)}, {time.time() - info["live_time"]}s')
 
         if uid not in status:
             status[uid] = new_status
@@ -60,10 +60,15 @@ async def live_sched():
                 print(f"no uid: {uid}, name: {await db.get_name(uid)}")
                 continue
             print(f"name: {await db.get_name(uid)}, live_time[uid]: {live_time[uid]}")
-            live_duration = int(time.time() - live_time[uid])
-            live_time_msg = f"\n本次直播时长 {calc_time_total(live_duration)}。" if live_time.get(uid) else "。"
+            current_duration = int(time.time() - live_time[uid])
+            live_time_msg = f"\n本次直播时长 {calc_time_total(current_duration)}。" if live_time.get(uid) else "。"
             live_msg = f"{name} 下播了{live_time_msg}"
-            await db.update_live_duration(uid=uid, live_duration=live_duration, stop_live=True)
+            # 累计时长
+            sub = await db.get_sub(uid=uid)
+            if sub:
+                current_duration += sub.live_duration
+                print(current_duration)
+            await db.update_live_duration(uid=uid, live_duration=current_duration, stop_live=True)
 
         # 推送
         push_list = await db.get_push_list(uid, "live")
