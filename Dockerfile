@@ -13,7 +13,9 @@ COPY requirements.txt .
 
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip install --no-cache-dir -r /tmp/requirements.txt && \
-    playwright install
+    export PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright && playwright install
 
 # run
 WORKDIR /app
+ENTRYPOINT ["nohup", "python", "bot.py", ">run.log", "2>&1", "&"]
+#CMD ["sleep", "infinity"]
