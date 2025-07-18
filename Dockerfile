@@ -13,7 +13,7 @@ COPY requirements.txt .
 
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip install --no-cache-dir -r /tmp/requirements.txt
-RUN export PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/playwright && playwright install
+RUN export PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/playwright && playwright install chromium
 
 # run
 WORKDIR /app
