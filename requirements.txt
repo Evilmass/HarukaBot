@@ -55,3 +55,4 @@ websockets==13.1
 win32-setctime==1.1.0
 yarl==1.15.2
 # redis==5.2.1
+nonebot-plugin-sticker-saver==0.1.4
