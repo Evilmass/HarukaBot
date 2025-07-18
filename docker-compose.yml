@@ -1,5 +1,3 @@
-version: '3.2'
-
 services:
   qqbot:
     #image: qqbot:latest  # docker build -t qqbot:latest .

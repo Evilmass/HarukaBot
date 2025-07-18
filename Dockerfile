@@ -17,5 +17,5 @@ RUN export PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/play
 
 # run
 WORKDIR /app
-ENTRYPOINT ["nohup", "python", "bot.py", ">run.log", "2>&1", "&"]
-#CMD ["sleep", "infinity"]
+# ENTRYPOINT ["nohup", "python", "bot.py", ">run.log", "2>&1", "&"]
+CMD ["sleep", "infinity"]
