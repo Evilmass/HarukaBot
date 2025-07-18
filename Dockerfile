@@ -12,8 +12,8 @@ WORKDIR /tmp
 COPY requirements.txt .
 
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
-    pip install --no-cache-dir -r /tmp/requirements.txt && \
-    export PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright && playwright install
+    pip install --no-cache-dir -r /tmp/requirements.txt
+RUN export PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/playwright && playwright install
 
 # run
 WORKDIR /app
