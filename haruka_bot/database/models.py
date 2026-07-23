@@ -55,6 +55,27 @@ class Sub(BaseModel):
     live_duration = IntField()  # 今日直播时长（秒）
 
 
+class LiveDurationDaily(BaseModel):
+    """A streamer's accumulated duration in one statistics day."""
+
+    uid = IntField()
+    stat_date = CharField(max_length=10, index=True)
+    duration = IntField(default=0)
+
+    class Meta:
+        table = "live_duration_daily"
+        unique_together = (("uid", "stat_date"),)
+
+
+class LiveSession(BaseModel):
+    """Persisted live session cursor used to resume accounting after restarts."""
+
+    uid = IntField(pk=True)
+    live_started_at = IntField()
+    accounted_until = IntField()
+    active = BooleanField(default=True)
+
+
 class User(BaseModel):
     uid = IntField(pk=True)
     name = CharField(max_length=20)

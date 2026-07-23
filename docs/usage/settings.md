@@ -97,6 +97,28 @@ HARUKA_DYNAMIC_INTERVAL=5
 HARUKA_LIVE_INTERVAL=20
 ```
 
+## HARUKA_LIVE_DURATION_DAY_START_HOUR
+
+默认值：0
+
+“耐播王”每日统计的切日小时，时区固定为 `Asia/Shanghai`。例如设置为
+`4` 时，一个统计日从当天 04:00 持续到次日 04:00，完整榜单也会在
+04:00 推送。
+
+```yml
+HARUKA_LIVE_DURATION_DAY_START_HOUR=4
+```
+
+## HARUKA_LIVE_DURATION_TOP_N
+
+默认值：8
+
+“耐播王”榜单最多展示的主播数量。
+
+```yml
+HARUKA_LIVE_DURATION_TOP_N=10
+```
+
 ## HARUKA_DYNAMIC_AT
 
 默认值：False

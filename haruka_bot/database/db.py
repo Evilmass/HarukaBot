@@ -1,4 +1,7 @@
+import asyncio
 import json
+import time
+from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -7,13 +10,38 @@ from nonebot.log import logger
 from packaging.version import Version as version_parser
 from tortoise import Tortoise
 from tortoise.connection import connections
+from tortoise.expressions import F
+from tortoise.transactions import in_transaction
 
+from ..config import plugin_config
 from ..utils import calc_time_total, get_path
+from ..utils.live_duration import (
+    split_duration_by_stat_date,
+    stat_date_for_timestamp,
+    stat_period_start_timestamp,
+)
 from ..version import VERSION as HBVERSION
-from .models import Group, Guild, Sub, User, Version
+from .models import (
+    Group,
+    Guild,
+    LiveDurationDaily,
+    LiveSession,
+    Sub,
+    User,
+    Version,
+)
 
 uid_list = {"live": {"list": [], "index": 0}, "dynamic": {"list": [], "index": 0}}
 dynamic_offset = {}
+live_duration_lock: Optional[asyncio.Lock] = None
+
+
+def get_live_duration_lock() -> asyncio.Lock:
+    """Create the lock lazily so Python 3.8 binds it to the running loop."""
+    global live_duration_lock
+    if live_duration_lock is None:
+        live_duration_lock = asyncio.Lock()
+    return live_duration_lock
 
 
 class DB:
@@ -42,6 +70,7 @@ class DB:
 
         await Tortoise.generate_schemas()
         await cls.migrate()
+        await cls.migrate_legacy_live_duration()
         await cls.update_uid_list()
 
     @classmethod
@@ -190,13 +219,74 @@ class DB:
         return await cls.get_subs(type=type, type_id=type_id)
 
     @classmethod
-    async def add_sub(cls, *, name, **kwargs) -> bool:
+    async def add_sub(cls, *, name, room_id=0, short_url=None, **kwargs) -> bool:
         """添加订阅"""
-        if not await Sub.add(live_duration=0, **kwargs):
+        if await cls.get_sub(
+            uid=kwargs["uid"],
+            type=kwargs["type"],
+            type_id=kwargs["type_id"],
+        ):
             return False
-        await cls.add_user(uid=kwargs["uid"], name=name)
+        await Sub.create(live_duration=0, **kwargs)
+        user = await cls.get_user(uid=kwargs["uid"])
+        user_data = {"name": name}
+        if room_id:
+            user_data["room_id"] = room_id
+        if short_url is not None:
+            user_data["short_url"] = short_url
+        if user:
+            await User.update({"uid": kwargs["uid"]}, **user_data)
+        else:
+            await User.create(
+                uid=kwargs["uid"],
+                name=name,
+                room_id=room_id,
+                short_url=short_url,
+            )
         if kwargs["type"] == "group":
             await cls.add_group(id=kwargs["type_id"], admin=True)
+        await cls.update_uid_list()
+        return True
+
+    @classmethod
+    async def get_sub_by_id(cls, sub_id: int):
+        """按数据库 ID 获取订阅。"""
+        return await Sub.get(id=sub_id).first()
+
+    @classmethod
+    async def update_sub_by_id(cls, sub_id: int, **kwargs):
+        """更新订阅；不存在返回 None，目标重复返回 False。"""
+        sub = await cls.get_sub_by_id(sub_id)
+        if not sub:
+            return None
+
+        new_type_id = kwargs.get("type_id", sub.type_id)
+        duplicate = await Sub.get(
+            uid=sub.uid,
+            type=sub.type,
+            type_id=new_type_id,
+        ).exclude(id=sub_id).exists()
+        if duplicate:
+            return False
+
+        allowed = {"type_id", "bot_id", "live", "dynamic", "at"}
+        updates = {key: value for key, value in kwargs.items() if key in allowed}
+        if updates:
+            await Sub.update({"id": sub_id}, **updates)
+        if sub.type == "group":
+            await cls.add_group(id=new_type_id, admin=True)
+        await cls.update_uid_list()
+        return True
+
+    @classmethod
+    async def delete_sub_by_id(cls, sub_id: int) -> bool:
+        """按数据库 ID 删除订阅并清理孤立主播。"""
+        sub = await cls.get_sub_by_id(sub_id)
+        if not sub:
+            return False
+        uid = sub.uid
+        await Sub.get(id=sub_id).delete()
+        await cls.delete_user(uid=uid)
         await cls.update_uid_list()
         return True
 
@@ -307,6 +397,12 @@ class DB:
         for uid in dynamic_uids - dynamic_offset_keys:
             dynamic_offset[uid] = -1
 
+        live_uids = uid_list["live"]["list"]
+        stale_sessions = LiveSession.filter(active=True)
+        if live_uids:
+            stale_sessions = stale_sessions.exclude(uid__in=live_uids)
+        await stale_sessions.update(active=False)
+
     async def backup(self):
         """备份数据库"""
         pass
@@ -322,89 +418,322 @@ class DB:
         pass
 
     @classmethod
-    async def get_live_duration(cls) -> List[Dict[str, str]]:
-        """
-        top_live_durations
-        {
-            100: [
-                {"uid": 1, "group_id": 100, "bot_id": 999, "user": "user1", "live_duration": 9639},
-                {"uid": 2, "group_id": 100, "bot_id": 999, "user": "user2", "live_duration": 3390},
-            ],
-            200: [{"uid": 3, "group_id": 200, "bot_id": 999, "user": "user3", "live_duration": 29674}],
-        }
-        """
-        # 获取所有订阅列表
-        res = []
-        subs = await cls.get_subs()
-        for sub in subs:
-            user = await cls.get_user(uid=sub.uid)
-            if sub.live_duration:
-                res.append(
-                    {
-                        "uid": sub.uid,
-                        "group_id": sub.type_id,
-                        "bot_id": sub.bot_id,
-                        "user": user.name,
-                        "live_duration": sub.live_duration,
-                    }
+    def get_live_stat_date(cls, timestamp: Optional[int] = None) -> date:
+        timestamp = int(time.time()) if timestamp is None else timestamp
+        return stat_date_for_timestamp(
+            timestamp,
+            plugin_config.haruka_live_duration_day_start_hour,
+        )
+
+    @classmethod
+    async def migrate_legacy_live_duration(cls):
+        """Move old per-subscription counters into the new daily table once."""
+        async with in_transaction():
+            legacy_rows = await Sub.filter(live_duration__gt=0).values(
+                "uid",
+                "live_duration",
+            )
+            if not legacy_rows:
+                return
+
+            legacy_by_uid: Dict[int, int] = {}
+            for row in legacy_rows:
+                uid = row["uid"]
+                legacy_by_uid[uid] = max(
+                    legacy_by_uid.get(uid, 0),
+                    row["live_duration"],
                 )
-        if not res:
+
+            stat_date = cls.get_live_stat_date().isoformat()
+            for uid, duration in legacy_by_uid.items():
+                daily = await LiveDurationDaily.get(
+                    uid=uid,
+                    stat_date=stat_date,
+                ).first()
+                if daily:
+                    if daily.duration < duration:
+                        await LiveDurationDaily.update(
+                            {"id": daily.id},
+                            duration=duration,
+                        )
+                else:
+                    await LiveDurationDaily.create(
+                        uid=uid,
+                        stat_date=stat_date,
+                        duration=duration,
+                    )
+
+            await Sub.filter(live_duration__gt=0).update(live_duration=0)
+        logger.info("已迁移旧版耐播王直播时长数据")
+
+    @classmethod
+    async def _increment_live_duration(cls, uid: int, stat_date: str, duration: int):
+        if duration <= 0:
+            return
+        _, created = await LiveDurationDaily.get_or_create(
+            uid=uid,
+            stat_date=stat_date,
+            defaults={"duration": duration},
+        )
+        if not created:
+            await LiveDurationDaily.filter(
+                uid=uid,
+                stat_date=stat_date,
+            ).update(duration=F("duration") + duration)
+
+    @classmethod
+    async def _add_live_interval(cls, uid: int, started_at: int, ended_at: int):
+        durations = split_duration_by_stat_date(
+            started_at,
+            ended_at,
+            plugin_config.haruka_live_duration_day_start_hour,
+        )
+        for stat_date, duration in durations.items():
+            await cls._increment_live_duration(uid, stat_date, duration)
+
+    @classmethod
+    async def observe_live_duration(
+        cls,
+        uid: int,
+        live_started_at: int,
+        observed_at: Optional[int] = None,
+    ) -> bool:
+        """Account an online observation and persist its resume cursor."""
+        async with get_live_duration_lock():
+            async with in_transaction():
+                return await cls._observe_live_duration(
+                    uid,
+                    live_started_at,
+                    observed_at,
+                )
+
+    @classmethod
+    async def _observe_live_duration(
+        cls,
+        uid: int,
+        live_started_at: int,
+        observed_at: Optional[int] = None,
+    ) -> bool:
+        observed_at = int(time.time()) if observed_at is None else observed_at
+        if live_started_at <= 0 or live_started_at > observed_at:
+            live_started_at = observed_at
+
+        session = await LiveSession.get(uid=uid).first()
+        if session and session.live_started_at == live_started_at:
+            account_from = max(session.accounted_until, live_started_at)
+        else:
+            # On first observation, recover the current statistics period without
+            # retroactively changing an already reported older period.
+            account_from = max(
+                live_started_at,
+                stat_period_start_timestamp(
+                    observed_at,
+                    plugin_config.haruka_live_duration_day_start_hour,
+                ),
+            )
+
+        if account_from < observed_at:
+            await cls._add_live_interval(uid, account_from, observed_at)
+
+        if session:
+            await LiveSession.update(
+                {"uid": uid},
+                live_started_at=live_started_at,
+                accounted_until=max(account_from, observed_at),
+                active=True,
+            )
+        else:
+            await LiveSession.create(
+                uid=uid,
+                live_started_at=live_started_at,
+                accounted_until=max(account_from, observed_at),
+                active=True,
+            )
+        return True
+
+    @classmethod
+    async def close_live_session(
+        cls,
+        uid: int,
+        observed_at: Optional[int] = None,
+        account_until_observation: bool = True,
+    ):
+        """Close a persisted session, optionally accounting up to this poll."""
+        async with get_live_duration_lock():
+            async with in_transaction():
+                await cls._close_live_session(
+                    uid,
+                    observed_at,
+                    account_until_observation,
+                )
+
+    @classmethod
+    async def _close_live_session(
+        cls,
+        uid: int,
+        observed_at: Optional[int] = None,
+        account_until_observation: bool = True,
+    ):
+        session = await LiveSession.get(uid=uid).first()
+        if not session:
             return
 
-        # 创建一个空字典来存储按group_id分组的数据
-        grouped_data = {}
+        observed_at = int(time.time()) if observed_at is None else observed_at
+        accounted_until = session.accounted_until
+        if (
+            session.active
+            and account_until_observation
+            and accounted_until < observed_at
+        ):
+            polling_grace = max(plugin_config.haruka_live_interval * 2, 60)
+            if observed_at - accounted_until <= polling_grace:
+                await cls._add_live_interval(uid, accounted_until, observed_at)
+                accounted_until = observed_at
 
-        # 遍历原始数据，按group_id分组
-        for item in res:
-            group_id = item["group_id"]
-            if group_id not in grouped_data:
-                grouped_data[group_id] = []
-            grouped_data[group_id].append(item)
+        await LiveSession.update(
+            {"uid": uid},
+            accounted_until=accounted_until,
+            active=False,
+        )
 
-        # 对每个group_id对应的列表按live_duration降序排序，并取前三个
-        top_live_durations = {}
-        for group_id, items in grouped_data.items():
-            # 按live_duration降序排序
-            sorted_items = sorted(items, key=lambda x: x["live_duration"], reverse=True)
-            # 取前八个
-            top_live_durations[group_id] = sorted_items[:8]
+    @classmethod
+    async def flush_live_duration(cls, observed_at: Optional[int] = None):
+        """Account active sessions through a report boundary."""
+        observed_at = int(time.time()) if observed_at is None else observed_at
+        async with get_live_duration_lock():
+            async with in_transaction():
+                sessions = await LiveSession.get(active=True)
+                for session in sessions:
+                    if session.accounted_until >= observed_at:
+                        continue
+                    # Do not assume a streamer stayed online through a long
+                    # polling outage merely because its last state was active.
+                    if observed_at - session.accounted_until > max(
+                        plugin_config.haruka_live_interval * 2,
+                        60,
+                    ):
+                        continue
+                    await cls._add_live_interval(
+                        session.uid,
+                        session.accounted_until,
+                        observed_at,
+                    )
+                    await LiveSession.update(
+                        {"uid": session.uid},
+                        accounted_until=observed_at,
+                    )
 
-        # 发送到不同群聊
-        message_list = []
-        message = "今日耐播王\n"
-        for group_id, top_items in top_live_durations.items():
-            for item in top_items:
-                message += f'{item["user"].ljust(15)}{calc_time_total(item["live_duration"])}\n'
-            message_list.append({"group_id": group_id, "bot_id": item["bot_id"], "message": message})
-            message = "今日耐播王\n"  # 重置消息头
+    @classmethod
+    async def get_live_duration_totals(
+        cls,
+        stat_date: Optional[date] = None,
+    ) -> Dict[int, int]:
+        stat_date = stat_date or cls.get_live_stat_date()
+        rows = await LiveDurationDaily.get(stat_date=stat_date.isoformat())
+        return {row.uid: row.duration for row in rows}
+
+    @classmethod
+    async def get_live_duration(
+        cls,
+        group_id: Optional[int] = None,
+        stat_date: Optional[date] = None,
+        title: str = "今日耐播王",
+    ) -> List[Dict[str, object]]:
+        """Build per-group live-duration ranking messages."""
+        totals = await cls.get_live_duration_totals(stat_date)
+        if not totals:
+            return []
+
+        subs_query = Sub.get(
+            type="group",
+            live=True,
+            uid__in=list(totals),
+        )
+        if group_id is not None:
+            subs_query = subs_query.filter(type_id=group_id)
+        subs = await subs_query
+        if not subs:
+            return []
+
+        users = await User.get(uid__in=list(totals))
+        names = {user.uid: user.name for user in users}
+        grouped_data: Dict[int, List[Dict[str, object]]] = {}
+        for sub in subs:
+            duration = totals.get(sub.uid, 0)
+            if duration <= 0:
+                continue
+            grouped_data.setdefault(sub.type_id, []).append(
+                {
+                    "uid": sub.uid,
+                    "bot_id": sub.bot_id,
+                    "user": names.get(sub.uid, str(sub.uid)),
+                    "live_duration": duration,
+                }
+            )
+
+        message_list: List[Dict[str, object]] = []
+        for current_group_id, items in grouped_data.items():
+            top_items = sorted(
+                items,
+                key=lambda item: (
+                    -int(item["live_duration"]),
+                    str(item["user"]),
+                    int(item["uid"]),
+                ),
+            )[: plugin_config.haruka_live_duration_top_n]
+            lines = [title]
+            for rank, item in enumerate(top_items, 1):
+                lines.append(
+                    f'{rank}. {item["user"]} — '
+                    f'{calc_time_total(item["live_duration"]).strip()}'
+                )
+            message_list.append(
+                {
+                    "group_id": current_group_id,
+                    "bot_id": top_items[0]["bot_id"],
+                    "message": "\n".join(lines),
+                }
+            )
 
         return message_list
 
     @classmethod
-    async def update_live_duration(cls, uid: int, live_duration: int = 0, stop_live: bool = False) -> bool:
-        """
-        Model.Update({uid}, **kwargs)
-        """
-        if await cls.get_user(uid=uid):
-            sub = await Sub.get(uid=uid).first()
-            if stop_live:
-                await Sub.update(
-                    {"uid": uid},
-                    live_duration=live_duration,
-                )
-            else:
-                await Sub.update(
-                    {"uid": uid},
-                    live_duration=sub.live_duration + live_duration,
-                )
-            return True
-        return False
+    async def update_live_duration(
+        cls,
+        uid: int,
+        live_duration: int = 0,
+        stop_live: bool = False,
+    ) -> bool:
+        """Compatibility helper for callers that still submit duration deltas."""
+        if not await User.get(uid=uid).exists():
+            return False
+        async with get_live_duration_lock():
+            async with in_transaction():
+                if stop_live:
+                    daily, _ = await LiveDurationDaily.get_or_create(
+                        uid=uid,
+                        stat_date=cls.get_live_stat_date().isoformat(),
+                        defaults={"duration": live_duration},
+                    )
+                    if daily.duration != live_duration:
+                        await LiveDurationDaily.update(
+                            {"id": daily.id},
+                            duration=live_duration,
+                        )
+                else:
+                    await cls._increment_live_duration(
+                        uid,
+                        cls.get_live_stat_date().isoformat(),
+                        live_duration,
+                    )
+        return True
 
     @classmethod
     async def reset_live_duration(cls):
-        subs = await cls.get_subs()
-        for sub in subs:
-            await Sub.update({"uid": sub.uid}, live_duration=0)
+        """Compatibility helper that clears only the current statistics day."""
+        await LiveDurationDaily.filter(
+            stat_date=cls.get_live_stat_date().isoformat()
+        ).delete()
 
 
 get_driver().on_startup(DB.init)

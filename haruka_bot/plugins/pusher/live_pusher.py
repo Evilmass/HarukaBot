@@ -6,7 +6,7 @@ from nonebot.log import logger
 
 from ...config import plugin_config
 from ...database import DB as db
-from ...utils import PROXIES, calc_time_total, get_short_url, safe_send, scheduler
+from ...utils import PROXIES, calc_time_total, safe_send, scheduler
 
 status = {}
 live_time = {}
@@ -26,14 +26,27 @@ async def live_sched():
         return
 
     for uid, info in res.items():
+        observed_at = int(time.time())
         new_status = 0 if info["live_status"] == 2 else info["live_status"]
-
-        # if info["live_status"] == 1:  # 直播累计时长
-        # await db.update_live_duration(uid=uid, live_duration=plugin_config.haruka_live_interval)
-        # print(f'name: {await db.get_name(uid)}, {time.time() - info["live_time"]}s')
+        if new_status:
+            started_at = int(info["live_time"] or observed_at)
+            live_time[uid] = started_at
+            await db.observe_live_duration(
+                uid=int(uid),
+                live_started_at=started_at,
+                observed_at=observed_at,
+            )
 
         if uid not in status:
             status[uid] = new_status
+            if not new_status:
+                # A persisted active cursor may remain after the bot was stopped.
+                # Do not count the unknown offline gap during startup recovery.
+                await db.close_live_session(
+                    uid=int(uid),
+                    observed_at=observed_at,
+                    account_until_observation=False,
+                )
             continue
         old_status = status[uid]
         if new_status == old_status:  # 直播间状态无变化
@@ -42,7 +55,6 @@ async def live_sched():
 
         name = info["uname"]
         if new_status:  # 开播
-            live_time[uid] = info["live_time"]
             room_id = info["short_id"] or info["room_id"]
             url = f"https://live.bilibili.com/{room_id}"
             title = info["title"]
@@ -54,21 +66,21 @@ async def live_sched():
             live_msg = f"{name} 开播啦！\n分区：{room_area}\n标题：{title}\n" + MessageSegment.image(cover) + f"\n{url}"
         else:  # 下播
             logger.info(f"检测到下播：{name}（{uid}）")
+            await db.close_live_session(
+                uid=int(uid),
+                observed_at=observed_at,
+            )
+            started_at = live_time.pop(uid, None)
             if not plugin_config.haruka_live_off_notify:  # 没开下播推送
+                await db.update_user(int(uid), name)
                 continue
-            if not live_time.get(uid, ""):
-                print(f"no uid: {uid}, name: {await db.get_name(uid)}")
-                continue
-            print(f"name: {await db.get_name(uid)}, live_time[uid]: {live_time[uid]}")
-            current_duration = int(time.time() - live_time[uid])
-            live_time_msg = f"\n本次直播时长 {calc_time_total(current_duration)}。" if live_time.get(uid) else "。"
+            current_duration = observed_at - started_at if started_at else 0
+            live_time_msg = (
+                f"\n本次直播时长 {calc_time_total(current_duration)}。"
+                if current_duration > 0
+                else "。"
+            )
             live_msg = f"{name} 下播了{live_time_msg}"
-            # 累计时长
-            sub = await db.get_sub(uid=uid)
-            if sub:
-                current_duration += sub.live_duration
-                print(current_duration)
-            await db.update_live_duration(uid=uid, live_duration=current_duration, stop_live=True)
 
         # 推送
         push_list = await db.get_push_list(uid, "live")
