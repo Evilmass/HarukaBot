@@ -72,44 +72,59 @@ class WebSecurityTests(unittest.TestCase):
 
     def test_login_and_csrf_protection(self):
         with TestClient(nonebot.get_app()) as client:
-            index = client.get("/haruka/")
+            redirect = client.get("/admin", follow_redirects=False)
+            self.assertEqual(redirect.status_code, 307)
+            self.assertEqual(redirect.headers["location"], "/admin/")
+
+            index = client.get("/admin/")
             self.assertEqual(index.status_code, 200)
             self.assertIn("default-src 'self'", index.headers["Content-Security-Policy"])
             self.assertEqual(index.headers["X-Frame-Options"], "DENY")
             self.assertEqual(index.headers["Cache-Control"], "no-cache")
 
-            static = client.get("/haruka/static/app.js")
+            static = client.get("/admin/static/app.js")
             self.assertEqual(static.status_code, 200)
             self.assertEqual(static.headers["X-Content-Type-Options"], "nosniff")
+
+            self.assertEqual(client.get("/haruka/").status_code, 404)
+            self.assertEqual(
+                client.get("/haruka/api/auth/session").status_code,
+                404,
+            )
 
             password = plugin_config.haruka_web_password
             plugin_config.haruka_web_password = None
             try:
-                disabled = client.get("/haruka/api/auth/session")
+                disabled = client.get("/admin/api/auth/session")
                 self.assertEqual(disabled.status_code, 503)
                 self.assertEqual(disabled.headers["Cache-Control"], "no-store")
             finally:
                 plugin_config.haruka_web_password = password
 
             wrong = client.post(
-                "/haruka/api/auth/login",
+                "/admin/api/auth/login",
                 json={"password": "wrong"},
             )
             self.assertEqual(wrong.status_code, 401)
             self.assertEqual(wrong.headers["Cache-Control"], "no-store")
 
             login = client.post(
-                "/haruka/api/auth/login",
+                "/admin/api/auth/login",
                 json={"password": "correct-horse-battery-staple"},
             )
             self.assertEqual(login.status_code, 200)
             self.assertTrue(login.json()["authenticated"])
+            set_cookie_headers = login.headers.get_list("set-cookie")
+            self.assertEqual(len(set_cookie_headers), 2)
+            self.assertTrue(
+                all("Path=/admin" in header for header in set_cookie_headers)
+            )
 
-            session = client.get("/haruka/api/auth/session")
+            session = client.get("/admin/api/auth/session")
             self.assertEqual(session.status_code, 200)
             self.assertTrue(session.json()["authenticated"])
 
-            no_csrf = client.delete("/haruka/api/subscriptions/999999")
+            no_csrf = client.delete("/admin/api/subscriptions/999999")
             self.assertEqual(no_csrf.status_code, 403)
 
             csrf = client.cookies.get(CSRF_COOKIE)
@@ -125,7 +140,7 @@ class WebSecurityTests(unittest.TestCase):
                 new=AsyncMock(return_value=room),
             ):
                 created = client.post(
-                    "/haruka/api/subscriptions",
+                    "/admin/api/subscriptions",
                     headers=headers,
                     json={
                         "room": "4001",
@@ -140,7 +155,7 @@ class WebSecurityTests(unittest.TestCase):
                 sub_id = created.json()["id"]
 
                 duplicate = client.post(
-                    "/haruka/api/subscriptions",
+                    "/admin/api/subscriptions",
                     headers=headers,
                     json={
                         "room": "4001",
@@ -151,7 +166,7 @@ class WebSecurityTests(unittest.TestCase):
                 self.assertEqual(duplicate.status_code, 409)
 
             updated = client.patch(
-                f"/haruka/api/subscriptions/{sub_id}",
+                f"/admin/api/subscriptions/{sub_id}",
                 headers=headers,
                 json={
                     "target_id": 2002,
@@ -167,7 +182,7 @@ class WebSecurityTests(unittest.TestCase):
             self.assertTrue(updated.json()["dynamic"])
 
             listing = client.get(
-                "/haruka/api/subscriptions",
+                "/admin/api/subscriptions",
                 params={
                     "q": "网页",
                     "target_type": "group",
@@ -177,7 +192,7 @@ class WebSecurityTests(unittest.TestCase):
             self.assertEqual(listing.status_code, 200)
             self.assertEqual(listing.json()["total"], 1)
 
-            options = client.get("/haruka/api/options")
+            options = client.get("/admin/api/options")
             self.assertEqual(options.status_code, 200)
             self.assertIn(3002, [bot["id"] for bot in options.json()["bots"]])
 
@@ -190,7 +205,7 @@ class WebSecurityTests(unittest.TestCase):
                 return_value={"4004": failing_bot},
             ):
                 _bot_cache["expires"] = 0
-                degraded = client.get("/haruka/api/options")
+                degraded = client.get("/admin/api/options")
             self.assertEqual(degraded.status_code, 200)
             degraded_bot = next(
                 bot for bot in degraded.json()["bots"] if bot["id"] == 4004
@@ -220,7 +235,7 @@ class WebSecurityTests(unittest.TestCase):
                 "haruka_bot.web.app._subscription_rows",
                 new=AsyncMock(return_value=export_rows),
             ):
-                json_export = client.get("/haruka/api/export.json")
+                json_export = client.get("/admin/api/export.json")
                 self.assertEqual(json_export.status_code, 200)
                 self.assertEqual(len(json_export.json()["subscriptions"]), 3)
                 self.assertEqual(
@@ -228,7 +243,7 @@ class WebSecurityTests(unittest.TestCase):
                     {"group", "private", "guild"},
                 )
 
-                csv_export = client.get("/haruka/api/export.csv")
+                csv_export = client.get("/admin/api/export.csv")
                 self.assertEqual(csv_export.status_code, 200)
                 self.assertTrue(csv_export.content.startswith(b"\xef\xbb\xbf"))
                 self.assertIn('"网页,测试主播"'.encode("utf-8"), csv_export.content)
@@ -236,13 +251,13 @@ class WebSecurityTests(unittest.TestCase):
                 self.assertIn("频道".encode("utf-8"), csv_export.content)
 
             deleted = client.delete(
-                f"/haruka/api/subscriptions/{sub_id}",
+                f"/admin/api/subscriptions/{sub_id}",
                 headers=headers,
             )
             self.assertEqual(deleted.status_code, 200)
 
             missing = client.delete(
-                f"/haruka/api/subscriptions/{sub_id}",
+                f"/admin/api/subscriptions/{sub_id}",
                 headers=headers,
             )
             self.assertEqual(missing.status_code, 404)
@@ -252,12 +267,12 @@ class WebSecurityTests(unittest.TestCase):
         try:
             for _ in range(5):
                 response = client.post(
-                    "/haruka/api/auth/login",
+                    "/admin/api/auth/login",
                     json={"password": "wrong"},
                 )
                 self.assertEqual(response.status_code, 401)
             limited = client.post(
-                "/haruka/api/auth/login",
+                "/admin/api/auth/login",
                 json={"password": "wrong"},
             )
             self.assertEqual(limited.status_code, 429)

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>HarukaBot 直播管理</title>
-    <link rel="stylesheet" href="/haruka/static/style.css" />
+    <link rel="stylesheet" href="/admin/static/style.css" />
   </head>
   <body>
     <div class="background-orb orb-one"></div>
@@ -45,7 +45,7 @@
           </div>
         </div>
         <nav aria-label="主导航">
-          <a class="nav-item active" href="/haruka/">
+          <a class="nav-item active" href="/admin/">
             <span class="nav-icon">◉</span>
             直播订阅
           </a>
@@ -68,8 +68,8 @@
             <div class="export-menu">
               <button id="export-toggle" class="button ghost" type="button">导出 ▾</button>
               <div id="export-popover" class="popover hidden">
-                <a href="/haruka/api/export.csv" data-export="csv">导出 CSV</a>
-                <a href="/haruka/api/export.json" data-export="json">导出 JSON</a>
+                <a href="/admin/api/export.csv" data-export="csv">导出 CSV</a>
+                <a href="/admin/api/export.json" data-export="json">导出 JSON</a>
               </div>
             </div>
             <button id="add-button" class="button primary" type="button">＋ 新增监控</button>
@@ -237,6 +237,6 @@
     </div>
 
     <div id="toast-region" class="toast-region" aria-live="polite"></div>
-    <script src="/haruka/static/app.js" defer></script>
+    <script src="/admin/static/app.js" defer></script>
   </body>
 </html>

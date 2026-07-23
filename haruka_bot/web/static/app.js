@@ -247,7 +247,7 @@ async function loadSubscriptions() {
   state.subscriptionController = controller;
   setLoading(true);
   try {
-    const payload = await api(`/haruka/api/subscriptions?${filtersQuery()}`, {
+    const payload = await api(`/admin/api/subscriptions?${filtersQuery()}`, {
       signal: controller.signal,
     });
     if (requestId !== state.subscriptionRequestId) return false;
@@ -275,7 +275,7 @@ async function loadOptions() {
   state.optionsLoading = true;
   updateBusyState();
   try {
-    const payload = await api("/haruka/api/options", {
+    const payload = await api("/admin/api/options", {
       signal: controller.signal,
     });
     if (requestId !== state.optionsRequestId) return false;
@@ -395,7 +395,7 @@ async function saveSubscription(event) {
     dynamic: $("#dynamic-switch").checked,
     at: $("#at-switch").checked,
   };
-  let path = "/haruka/api/subscriptions";
+  let path = "/admin/api/subscriptions";
   let method = "POST";
   if (state.editing) {
     path += `/${state.editing.id}`;
@@ -434,7 +434,7 @@ async function deleteSubscription(item) {
   }
   setMutationLoading(true);
   try {
-    await api(`/haruka/api/subscriptions/${item.id}`, { method: "DELETE" });
+    await api(`/admin/api/subscriptions/${item.id}`, { method: "DELETE" });
     await refreshData("订阅已删除");
   } catch (error) {
     toast(error.message, "error");
@@ -462,7 +462,7 @@ function debounce(fn, delay) {
 
 async function initialize() {
   try {
-    const session = await api("/haruka/api/auth/session");
+    const session = await api("/admin/api/auth/session");
     if (!session.authenticated) {
       showLogin();
       return;
@@ -480,7 +480,7 @@ $("#login-form").addEventListener("submit", async (event) => {
   $("#login-error").textContent = "";
   button.disabled = true;
   try {
-    await api("/haruka/api/auth/login", {
+    await api("/admin/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ password: $("#login-password").value }),
     });
@@ -496,7 +496,7 @@ $("#login-form").addEventListener("submit", async (event) => {
 
 $("#logout-button").addEventListener("click", async () => {
   try {
-    await api("/haruka/api/auth/logout", { method: "POST" });
+    await api("/admin/api/auth/logout", { method: "POST" });
   } finally {
     state.items = [];
     state.bots = [];

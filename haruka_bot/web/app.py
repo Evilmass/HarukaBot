@@ -50,7 +50,7 @@ WEB_CONTENT_SECURITY_POLICY = (
     "style-src 'self'"
 )
 
-router = APIRouter(prefix="/haruka", tags=["HarukaBot Web"])
+router = APIRouter(prefix="/admin", tags=["HarukaBot Web"])
 _login_failures: Dict[str, List[float]] = {}
 _bot_cache: Dict[str, Any] = {"expires": 0.0, "value": None}
 _bot_cache_lock = asyncio.Lock()
@@ -246,7 +246,7 @@ def _set_session_cookies(response: Response, session: Dict[str, str]):
         "max_age": plugin_config.haruka_web_session_ttl,
         "secure": plugin_config.haruka_web_cookie_secure,
         "samesite": "strict",
-        "path": "/haruka",
+        "path": "/admin",
     }
     response.set_cookie(
         SESSION_COOKIE,
@@ -263,8 +263,8 @@ def _set_session_cookies(response: Response, session: Dict[str, str]):
 
 
 def _delete_session_cookies(response: Response):
-    response.delete_cookie(SESSION_COOKIE, path="/haruka")
-    response.delete_cookie(CSRF_COOKIE, path="/haruka")
+    response.delete_cookie(SESSION_COOKIE, path="/admin")
+    response.delete_cookie(CSRF_COOKIE, path="/admin")
 
 
 async def _bot_api(bot, api: str):
@@ -458,7 +458,7 @@ async def _resolve_room(value: str) -> Dict[str, Any]:
 
 @router.get("", include_in_schema=False)
 async def web_redirect():
-    return RedirectResponse("/haruka/", status_code=307)
+    return RedirectResponse("/admin/", status_code=307)
 
 
 @router.get("/", include_in_schema=False)
@@ -718,7 +718,7 @@ def setup_web():
     async def add_haruka_security_headers(request: Request, call_next):
         response = await call_next(request)
         path = request.url.path
-        if path == "/haruka" or path.startswith("/haruka/"):
+        if path == "/admin" or path.startswith("/admin/"):
             response.headers["Content-Security-Policy"] = WEB_CONTENT_SECURITY_POLICY
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["X-Frame-Options"] = "DENY"
@@ -727,13 +727,13 @@ def setup_web():
                 "camera=(), geolocation=(), microphone=()"
             )
             response.headers["Cache-Control"] = (
-                "no-store" if path.startswith("/haruka/api/") else "no-cache"
+                "no-store" if path.startswith("/admin/api/") else "no-cache"
             )
         return response
 
     app.include_router(router)
     app.mount(
-        "/haruka/static",
+        "/admin/static",
         StaticFiles(directory=str(STATIC_ROOT)),
         name="haruka-static",
     )
@@ -741,4 +741,4 @@ def setup_web():
     if not plugin_config.haruka_web_password:
         logger.warning("未配置 HARUKA_WEB_PASSWORD，HarukaBot Web 管理功能已安全禁用")
     else:
-        logger.info("HarukaBot Web 管理页面已启用：/haruka/")
+        logger.info("HarukaBot Web 管理页面已启用：/admin/")

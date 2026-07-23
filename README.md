@@ -71,7 +71,7 @@ HARUKA_WEB_COOKIE_SECURE=False
 启动机器人后访问：
 
 ```text
-http://<服务器地址>:7070/haruka/
+http://<服务器地址>:7070/admin/
 ```
 
 未设置 `HARUKA_WEB_PASSWORD` 时，管理 API 会返回 503，不会以无认证模式开放。
