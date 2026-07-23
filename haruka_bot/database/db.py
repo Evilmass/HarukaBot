@@ -34,6 +34,8 @@ from .models import (
 uid_list = {"live": {"list": [], "index": 0}, "dynamic": {"list": [], "index": 0}}
 dynamic_offset = {}
 live_duration_lock: Optional[asyncio.Lock] = None
+subscription_lock: Optional[asyncio.Lock] = None
+subscription_lock_loop = None
 
 
 def get_live_duration_lock() -> asyncio.Lock:
@@ -42,6 +44,16 @@ def get_live_duration_lock() -> asyncio.Lock:
     if live_duration_lock is None:
         live_duration_lock = asyncio.Lock()
     return live_duration_lock
+
+
+def get_subscription_lock() -> asyncio.Lock:
+    """Return one subscription mutation lock for the current event loop."""
+    global subscription_lock, subscription_lock_loop
+    loop = asyncio.get_running_loop()
+    if subscription_lock is None or subscription_lock_loop is not loop:
+        subscription_lock = asyncio.Lock()
+        subscription_lock_loop = loop
+    return subscription_lock
 
 
 class DB:
@@ -221,32 +233,33 @@ class DB:
     @classmethod
     async def add_sub(cls, *, name, room_id=0, short_url=None, **kwargs) -> bool:
         """添加订阅"""
-        if await cls.get_sub(
-            uid=kwargs["uid"],
-            type=kwargs["type"],
-            type_id=kwargs["type_id"],
-        ):
-            return False
-        await Sub.create(live_duration=0, **kwargs)
-        user = await cls.get_user(uid=kwargs["uid"])
-        user_data = {"name": name}
-        if room_id:
-            user_data["room_id"] = room_id
-        if short_url is not None:
-            user_data["short_url"] = short_url
-        if user:
-            await User.update({"uid": kwargs["uid"]}, **user_data)
-        else:
-            await User.create(
+        async with get_subscription_lock():
+            if await cls.get_sub(
                 uid=kwargs["uid"],
-                name=name,
-                room_id=room_id,
-                short_url=short_url,
-            )
-        if kwargs["type"] == "group":
-            await cls.add_group(id=kwargs["type_id"], admin=True)
-        await cls.update_uid_list()
-        return True
+                type=kwargs["type"],
+                type_id=kwargs["type_id"],
+            ):
+                return False
+            await Sub.create(live_duration=0, **kwargs)
+            user = await cls.get_user(uid=kwargs["uid"])
+            user_data = {"name": name}
+            if room_id:
+                user_data["room_id"] = room_id
+            if short_url is not None:
+                user_data["short_url"] = short_url
+            if user:
+                await User.update({"uid": kwargs["uid"]}, **user_data)
+            else:
+                await User.create(
+                    uid=kwargs["uid"],
+                    name=name,
+                    room_id=room_id,
+                    short_url=short_url,
+                )
+            if kwargs["type"] == "group":
+                await cls.add_group(id=kwargs["type_id"], admin=True)
+            await cls.update_uid_list()
+            return True
 
     @classmethod
     async def get_sub_by_id(cls, sub_id: int):
@@ -256,49 +269,52 @@ class DB:
     @classmethod
     async def update_sub_by_id(cls, sub_id: int, **kwargs):
         """更新订阅；不存在返回 None，目标重复返回 False。"""
-        sub = await cls.get_sub_by_id(sub_id)
-        if not sub:
-            return None
+        async with get_subscription_lock():
+            sub = await cls.get_sub_by_id(sub_id)
+            if not sub:
+                return None
 
-        new_type_id = kwargs.get("type_id", sub.type_id)
-        duplicate = await Sub.get(
-            uid=sub.uid,
-            type=sub.type,
-            type_id=new_type_id,
-        ).exclude(id=sub_id).exists()
-        if duplicate:
-            return False
+            new_type_id = kwargs.get("type_id", sub.type_id)
+            duplicate = await Sub.get(
+                uid=sub.uid,
+                type=sub.type,
+                type_id=new_type_id,
+            ).exclude(id=sub_id).exists()
+            if duplicate:
+                return False
 
-        allowed = {"type_id", "bot_id", "live", "dynamic", "at"}
-        updates = {key: value for key, value in kwargs.items() if key in allowed}
-        if updates:
-            await Sub.update({"id": sub_id}, **updates)
-        if sub.type == "group":
-            await cls.add_group(id=new_type_id, admin=True)
-        await cls.update_uid_list()
-        return True
+            allowed = {"type_id", "bot_id", "live", "dynamic", "at"}
+            updates = {key: value for key, value in kwargs.items() if key in allowed}
+            if updates:
+                await Sub.update({"id": sub_id}, **updates)
+            if sub.type == "group":
+                await cls.add_group(id=new_type_id, admin=True)
+            await cls.update_uid_list()
+            return True
 
     @classmethod
     async def delete_sub_by_id(cls, sub_id: int) -> bool:
         """按数据库 ID 删除订阅并清理孤立主播。"""
-        sub = await cls.get_sub_by_id(sub_id)
-        if not sub:
-            return False
-        uid = sub.uid
-        await Sub.get(id=sub_id).delete()
-        await cls.delete_user(uid=uid)
-        await cls.update_uid_list()
-        return True
+        async with get_subscription_lock():
+            sub = await cls.get_sub_by_id(sub_id)
+            if not sub:
+                return False
+            uid = sub.uid
+            await Sub.get(id=sub_id).delete()
+            await cls.delete_user(uid=uid)
+            await cls.update_uid_list()
+            return True
 
     @classmethod
     async def delete_sub(cls, uid, type, type_id) -> bool:
         """删除指定订阅"""
-        if await Sub.delete(uid=uid, type=type, type_id=type_id):
-            await cls.delete_user(uid=uid)
-            await cls.update_uid_list()
-            return True
-        # 订阅不存在
-        return False
+        async with get_subscription_lock():
+            if await Sub.delete(uid=uid, type=type, type_id=type_id):
+                await cls.delete_user(uid=uid)
+                await cls.update_uid_list()
+                return True
+            # 订阅不存在
+            return False
 
     @classmethod
     async def delete_sub_list(cls, type, type_id):
@@ -310,7 +326,10 @@ class DB:
     @classmethod
     async def set_sub(cls, conf, switch, **kwargs):
         """开关订阅设置"""
-        return await Sub.update(kwargs, **{conf: switch})
+        async with get_subscription_lock():
+            result = await Sub.update(kwargs, **{conf: switch})
+            await cls.update_uid_list()
+            return result
 
     @classmethod
     async def get_version(cls):

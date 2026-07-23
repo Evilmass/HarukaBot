@@ -36,6 +36,51 @@ HARUKA_GUILD_ADMIN_ROLES=["Haruka", "频道主"]
 HARUKA_DIR="./data/"
 ```
 
+## HARUKA_WEB_PASSWORD
+
+默认值：None
+
+Web 直播订阅管理页面的登录密码。配置后可访问
+`http://<服务器地址>:<PORT>/haruka/`；未配置时管理 API 返回 503，不会以
+无认证模式开放。请使用独立的强密码。
+
+```yml
+HARUKA_WEB_PASSWORD=请设置一个强密码
+```
+
+## HARUKA_WEB_SECRET
+
+默认值：None
+
+Web 会话签名密钥。留空时从 `HARUKA_WEB_PASSWORD` 派生；单独配置后，更换
+管理密码不会自动使已有会话失效。
+
+```yml
+HARUKA_WEB_SECRET=请设置一段随机字符串
+```
+
+## HARUKA_WEB_SESSION_TTL
+
+默认值：43200
+
+Web 登录会话有效期，单位为秒，最小 60 秒。默认值为 12 小时。
+
+```yml
+HARUKA_WEB_SESSION_TTL=43200
+```
+
+## HARUKA_WEB_COOKIE_SECURE
+
+默认值：False
+
+是否仅允许浏览器通过 HTTPS 发送管理会话 Cookie。通过 HTTPS 反向代理对外
+提供管理页面时应设置为 `True`；直接使用 HTTP 访问时必须保持 `False`，否则
+浏览器无法保持登录状态。
+
+```yml
+HARUKA_WEB_COOKIE_SECURE=True
+```
+
 ## HARUKA_TO_ME
 
 默认值：True

@@ -6,6 +6,10 @@ if isinstance(globals()["__loader__"], PluginLoader):
 
     on_startup()
 
+    from .web import setup_web
+
+    setup_web()
+
     from . import plugins  # noqa: F401
 
 from .version import VERSION, __version__  # noqa: F401
