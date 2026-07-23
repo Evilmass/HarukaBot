@@ -27,6 +27,7 @@ multidict==6.1.0
 nonebot-adapter-onebot==2.4.3
 nonebot-plugin-apscheduler==0.4.0
 nonebot-plugin-guild-patch==0.2.3
+nonebot-plugin-sticker-saver==0.1.4
 nonebot2==2.2.1
 packaging==24.2
 playwright==1.48.0
@@ -55,4 +56,3 @@ websockets==13.1
 win32-setctime==1.1.0
 yarl==1.15.2
 # redis==5.2.1
-nonebot-plugin-sticker-saver==0.1.4

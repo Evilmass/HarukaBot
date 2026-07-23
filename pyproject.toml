@@ -20,6 +20,7 @@ dependencies = [
     #"bilireq @ git+https://github.com/Evilmass/bilireq",
     "packaging>=23.1",
     "nonebot-plugin-guild-patch>=0.2.3",
+    "nonebot-plugin-sticker-saver>=0.1.4,<0.2.0",
     "msvc-runtime>=14.34.31931; sys_platform == \"win32\"",
     "aunly-captcha-solver>=0.1",
 ]

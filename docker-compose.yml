@@ -1,38 +1,32 @@
 services:
   qqbot:
-    #image: qqbot:latest  # docker build -t qqbot:latest .
     build:
-      context: ./
+      context: .
       dockerfile: Dockerfile
-    container_name: qqbot
-    restart: always
+    image: haruka-bot:local
+    init: true
+    ipc: host
+    restart: unless-stopped
+    env_file:
+      - path: ./.env.prod
+        required: false
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "7070"
+      HARUKA_DIR: "/app/data/"
+      TZ: "Asia/Shanghai"
     volumes:
       - ./data:/app/data
-      - ./haruka_bot:/app/haruka_bot
-      - ./pyproject.toml:/app/pyproject.toml
-      - ./.env.prod:/app/.env.prod  # cp .env.example .env.prod
-      - ./bot.py:/app/bot.py
-    environment:
-      TZ: "Asia/Shanghai"
-      HOST: "0.0.0.0"
-    networks:
-      - ip6net
+      - ./logs:/app/logs
     ports:
-      - 7070:7070
-    # command: "python bot.py"
-    command: "sleep infinity"
-
-  # redis:
-  #   image: redis:7.2.4-alpine
-  #   restart: always
-  #   networks:
-  #     - ip6net
-  #   ports:
-  #     - 6379:6379
-  #   command: redis-server --save 20 1 --loglevel warning
-  #   volumes:
-  #     - redsi_data:/data
-
-networks:
-  ip6net:
-    external: true
+      - "${HARUKA_HOST_PORT:-7070}:7070"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 7070), 2).close()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

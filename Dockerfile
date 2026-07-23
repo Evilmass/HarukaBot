@@ -1,21 +1,37 @@
-FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
+
+ARG PIP_INDEX_URL=https://pypi.org/simple
 
 ENV TZ=Asia/Shanghai \
-    LANG=zh_CN.UTF-8 \
-    HOST=0.0.0.0
+    LANG=C.UTF-8 \
+    HOST=0.0.0.0 \
+    PORT=7070 \
+    HARUKA_DIR=/app/data/ \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-EXPOSE 8080
-
-# requirements
-WORKDIR /tmp
-
-COPY requirements.txt .
-
-RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
-    pip install --no-cache-dir -r /tmp/requirements.txt
-RUN export PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/playwright && playwright install chromium
-
-# run
 WORKDIR /app
-# ENTRYPOINT ["nohup", "python", "bot.py", ">run.log", "2>&1", "&"]
-CMD ["sleep", "infinity"]
+
+# bilireq is installed from a pinned Git commit, so git is a build dependency.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep dependency installation cacheable when application code changes.
+COPY requirements.txt /tmp/requirements.txt
+RUN python -m pip install --no-cache-dir --prefer-binary \
+    --index-url "${PIP_INDEX_URL}" \
+    -r /tmp/requirements.txt
+
+# The Playwright image already contains the Chromium version matching
+# playwright==1.48.0, so no browser download is needed during the build.
+COPY pyproject.toml bot.py ./
+COPY .env.example ./.env.prod
+COPY haruka_bot ./haruka_bot
+RUN mkdir -p /app/data /app/logs
+
+EXPOSE 7070
+STOPSIGNAL SIGTERM
+
+CMD ["python", "bot.py"]

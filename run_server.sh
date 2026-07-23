@@ -1,6 +1,6 @@
+#!/bin/sh
+set -eu
 
-# !/bin/sh
-pkill python
-sleep 1
-nohup python bot.py >> run.log 2>&1 &
-tail -f run.log
+# Dependencies, including nonebot-plugin-sticker-saver, are installed at build
+# time. Keeping Python in the foreground lets Docker forward stop signals.
+exec python bot.py

@@ -73,6 +73,8 @@ target/
 
 # Virtual environment
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 
