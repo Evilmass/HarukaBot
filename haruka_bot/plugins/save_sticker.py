@@ -20,8 +20,8 @@ face_extractor = on_command(
     block=True,
 )
 
-TARGET_REDIRECT_URL = "https://pic.colanns.me"
-TARGET_REDIRECT_URL_NT = "https://ntpic.colanns.me"
+# TARGET_REDIRECT_URL = "https://pic.colanns.me"
+# TARGET_REDIRECT_URL_NT = "https://ntpic.colanns.me"
 
 
 @face_extractor.handle()
@@ -37,12 +37,13 @@ async def handle_face_extraction(bot: Bot, event: MessageEvent):
                 if not image_source:
                     continue
                 image_url = str(image_source)
+                url = image_url
                 # 用于 .gif 格式的表情包保存，加上一层跳转防止可能的检测
-                url = (
-                    image_url
-                    .replace("https://gchat.qpic.cn", TARGET_REDIRECT_URL)
-                    .replace("https://multimedia.nt.qq.com.cn", TARGET_REDIRECT_URL_NT)
-                )
+                # url = (
+                #     image_url
+                #     .replace("https://gchat.qpic.cn", TARGET_REDIRECT_URL)
+                #     .replace("https://multimedia.nt.qq.com.cn", TARGET_REDIRECT_URL_NT)
+                # )
                 content = Message(
                     [
                         MessageSegment.text("表情："),
