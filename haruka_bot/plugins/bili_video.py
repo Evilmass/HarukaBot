@@ -1,17 +1,20 @@
 import asyncio
-import base64
 import json
 import re
+import secrets
 import shutil
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import nonebot
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
 from nonebot import on_message
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent
@@ -41,10 +44,44 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+VIDEO_DOWNLOAD_ROUTE = "/haruka/bili-video/{token}/video.mp4"
+_temporary_video_files: Dict[str, Path] = {}
 
 
 class BiliVideoError(RuntimeError):
     """可安全展示给群聊用户的下载错误。"""
+
+
+async def _serve_temporary_video(token: str):
+    video_path = _temporary_video_files.get(token)
+    if video_path is None or not video_path.is_file():
+        raise HTTPException(status_code=404, detail="视频不存在或下载地址已失效")
+    return FileResponse(
+        video_path,
+        media_type="video/mp4",
+        filename="video.mp4",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _register_video_download_route() -> None:
+    try:
+        app = nonebot.get_app()
+    except Exception as error:
+        logger.warning(f"无法注册 B 站视频临时下载路由：{error}")
+        return
+    if getattr(app.state, "haruka_bili_video_route_registered", False):
+        return
+    app.add_api_route(
+        VIDEO_DOWNLOAD_ROUTE,
+        _serve_temporary_video,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    app.state.haruka_bili_video_route_registered = True
+
+
+_register_video_download_route()
 
 
 @dataclass(frozen=True)
@@ -591,10 +628,23 @@ def _format_size(size: Optional[int]) -> str:
     return f"{size / 1024 / 1024:.1f} MB"
 
 
-def _video_base64_uri(video_path: Path) -> str:
-    """将视频编码为 OneBot 可跨进程、跨容器传输的资源地址。"""
-    encoded = base64.b64encode(video_path.read_bytes()).decode("ascii")
-    return f"base64://{encoded}"
+@contextmanager
+def _temporary_video_url(video_path: Path) -> Iterator[str]:
+    base_url = plugin_config.haruka_bili_video_public_base_url
+    if not base_url:
+        raise BiliVideoError(
+            "未配置 HARUKA_BILI_VIDEO_PUBLIC_BASE_URL，"
+            "无法让 OneBot 客户端下载视频"
+        )
+    token = secrets.token_urlsafe(32)
+    _temporary_video_files[token] = video_path
+    try:
+        yield (
+            f"{base_url.rstrip('/')}/haruka/bili-video/"
+            f"{token}/video.mp4"
+        )
+    finally:
+        _temporary_video_files.pop(token, None)
 
 
 def _cleanup_stale_downloads(download_root: Path, min_age_seconds: int = 300) -> None:
@@ -625,23 +675,41 @@ async def send_forward_video(
     )
     size = video_path.stat().st_size
     size_mb = size / 1024 / 1024
-    loop = asyncio.get_running_loop()
-    encode_started = time.perf_counter()
-    logger.info(
-        f"[B站视频][{info.bvid}] 开始 Base64 编码：{size_mb:.1f} MB"
+    download_started = time.perf_counter()
+    with _temporary_video_url(video_path) as video_url:
+        logger.info(
+            f"[B站视频][{info.bvid}] 开始让 NapCat 下载临时视频："
+            f"{size_mb:.1f} MB"
+        )
+        try:
+            download_result = await bot.call_api(
+                "download_file",
+                url=video_url,
+                thread_count=1,
+                headers="",
+                _timeout=plugin_config.haruka_bili_video_timeout,
+            )
+        except Exception as error:
+            logger.warning(
+                f"[B站视频][{info.bvid}] NapCat 下载临时视频失败："
+                f"耗时 {time.perf_counter() - download_started:.2f} 秒，"
+                f"异常类型 {type(error).__name__}：{error}"
+            )
+            raise
+    napcat_video_path = (
+        download_result.get("file") if isinstance(download_result, dict) else None
     )
-    video_uri = await loop.run_in_executor(None, _video_base64_uri, video_path)
-    encoded_size_mb = len(video_uri) / 1024 / 1024
+    if not napcat_video_path:
+        raise BiliVideoError("NapCat 下载视频后没有返回本地文件路径")
     logger.info(
-        f"[B站视频][{info.bvid}] Base64 编码完成："
-        f"{encoded_size_mb:.1f} MB，耗时 "
-        f"{time.perf_counter() - encode_started:.2f} 秒"
+        f"[B站视频][{info.bvid}] NapCat 下载临时视频完成，耗时 "
+        f"{time.perf_counter() - download_started:.2f} 秒"
     )
-    video = Message(MessageSegment.video(video_uri))
+    video = Message(MessageSegment.video(str(napcat_video_path)))
     node_base = {"name": "HarukaBot", "uin": str(bot.self_id)}
     logger.info(
         f"[B站视频][{info.bvid}] 开始调用 OneBot 合并转发："
-        f"原文件 {size_mb:.1f} MB，Base64 {encoded_size_mb:.1f} MB，"
+        f"视频 {size_mb:.1f} MB，"
         f"OneBot 超时 {plugin_config.haruka_bili_video_timeout} 秒"
     )
     onebot_started = time.perf_counter()
@@ -755,13 +823,13 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
                             f"{time.perf_counter() - task_started:.2f} 秒"
                         )
                     finally:
-                        # 视频内容已随 OneBot 请求传输，不再依赖 NapCat 读取本地路径。
+                        # NapCat 已下载到自己的临时目录，不再依赖 HarukaBot 文件。
                         shutil.rmtree(download_dir, ignore_errors=True)
             except BiliVideoError as error:
-                logger.warning(f"B 站视频 {reference.key} 下载失败：{error}")
+                logger.warning(f"B 站视频 {reference.key} 处理失败：{error}")
                 await bot.send_group_msg(
                     group_id=event.group_id,
-                    message=f"B 站视频下载失败：{error}",
+                    message=f"B 站视频处理失败：{error}",
                 )
             except NetworkError as error:
                 logger.warning(f"B 站视频 {reference.key} 发送超时：{error}")

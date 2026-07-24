@@ -185,6 +185,18 @@ HARUKA_LIVE_DURATION_TOP_N=10
 HARUKA_DYNAMIC_AT=True
 ```
 
+## HARUKA_BILI_VIDEO_PUBLIC_BASE_URL
+
+默认值：未配置
+
+HarukaBot 对 OneBot/NapCat 可访问的 HTTP 地址，用于临时传输下载并合并后的
+B 站视频。启用群聊 B 站视频转发时必须配置，不要填写 `0.0.0.0` 或
+`127.0.0.1`，应填写 NapCat 实际能够访问的局域网地址或域名。
+
+```yml
+HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
+```
+
 <!-- ## HARUKA_SCREENSHOT_STYLE
 
 默认值：mobile

@@ -65,6 +65,8 @@ ws://127.0.0.1:7070/onebot/v11/ws
 HARUKA_BILI_VIDEO_GROUPS=[123456789,987654321]
 # 可选；登录 Cookie 能获取账号有权观看的清晰度，请妥善保管
 HARUKA_BILI_VIDEO_COOKIE=
+# HarukaBot 对 NapCat 可访问的地址
+HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 HARUKA_BILI_VIDEO_QUALITY=80
 HARUKA_BILI_VIDEO_MAX_SIZE_MB=100
 HARUKA_BILI_VIDEO_MAX_LINKS=3
@@ -73,8 +75,9 @@ HARUKA_BILI_VIDEO_TIMEOUT=600
 ```
 
 宿主机运行时需安装 `ffmpeg` 并确保它在 `PATH` 中；Docker 镜像已内置。
-视频使用 `file://` 地址交给 OneBot 实现上传，因此 OneBot 与 HarukaBot 分开
-部署时，需要让两者共享 `HARUKA_DIR` 对应的目录及相同文件路径。
+HarukaBot 会通过临时 HTTP 地址让 NapCat 下载合并后的视频，再使用 NapCat
+本地路径发送消息。`HARUKA_BILI_VIDEO_PUBLIC_BASE_URL` 必须填写 NapCat
+能够访问的 HarukaBot 地址；临时地址使用随机令牌并在下载完成后立即失效。
 
 ## Web 直播订阅管理
 

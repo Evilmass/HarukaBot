@@ -3,18 +3,25 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlparse
 
 import httpx
 import nonebot
+from fastapi import HTTPException
 
 nonebot.init()
 nonebot.load_plugin("nonebot_plugin_guild_patch")
 
-from haruka_bot.config import Config
+from haruka_bot.config import Config, plugin_config
 from haruka_bot.plugins.bili_video import (
+    VIDEO_DOWNLOAD_ROUTE,
+    BiliVideoError,
     BiliVideoDownloader,
     VideoInfo,
     _http_client_options,
+    _serve_temporary_video,
+    _temporary_video_files,
+    _temporary_video_url,
     extract_message_urls,
     get_dash_stream_candidates,
     parse_video_url,
@@ -46,6 +53,73 @@ class BiliVideoConfigTests(unittest.TestCase):
         ):
             groups = Config().haruka_bili_video_groups
         self.assertEqual(groups, [123, 456, 789])
+
+    def test_public_base_url_is_optional(self):
+        self.assertIsNone(Config().haruka_bili_video_public_base_url)
+        self.assertEqual(
+            Config(
+                haruka_bili_video_public_base_url="http://192.168.31.131:7070"
+            ).haruka_bili_video_public_base_url,
+            "http://192.168.31.131:7070",
+        )
+
+
+class BiliVideoTemporaryHttpTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        self.video_path = TEST_OUTPUT_DIR / "temporary-http-video.mp4"
+        self.video_path.write_bytes(b"temporary-video-content")
+        _temporary_video_files.clear()
+
+    def tearDown(self):
+        _temporary_video_files.clear()
+
+    async def test_temporary_url_serves_video_then_expires(self):
+        with patch.object(
+            plugin_config,
+            "haruka_bili_video_public_base_url",
+            "http://192.168.31.131:7070",
+        ):
+            with _temporary_video_url(self.video_path) as video_url:
+                request_path = urlparse(video_url).path
+                token = request_path.split("/")[-2]
+                response = await _serve_temporary_video(token)
+                sent_messages = []
+
+                async def receive():
+                    return {"type": "http.request", "body": b"", "more_body": False}
+
+                async def send(message):
+                    sent_messages.append(message)
+
+                await response(
+                    {
+                        "type": "http",
+                        "method": "GET",
+                        "path": request_path,
+                        "headers": [],
+                    },
+                    receive,
+                    send,
+                )
+                body = b"".join(
+                    message.get("body", b"") for message in sent_messages
+                )
+                self.assertEqual(body, b"temporary-video-content")
+                self.assertEqual(response.media_type, "video/mp4")
+                self.assertEqual(response.headers["cache-control"], "no-store")
+            with self.assertRaises(HTTPException) as expired:
+                await _serve_temporary_video(token)
+            self.assertEqual(expired.exception.status_code, 404)
+
+    async def test_unknown_token_returns_not_found(self):
+        with self.assertRaises(HTTPException) as unknown:
+            await _serve_temporary_video("unknown-token")
+        self.assertEqual(unknown.exception.status_code, 404)
+        self.assertIn(
+            VIDEO_DOWNLOAD_ROUTE,
+            {route.path for route in nonebot.get_app().routes},
+        )
 
 
 class BiliVideoUrlTests(unittest.IsolatedAsyncioTestCase):
@@ -274,7 +348,13 @@ class BiliVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
-    async def test_sends_video_in_forward_node(self):
+    def setUp(self):
+        _temporary_video_files.clear()
+
+    def tearDown(self):
+        _temporary_video_files.clear()
+
+    def _video_fixture(self):
         bot = AsyncMock()
         bot.self_id = "10000"
         event = SimpleNamespace(group_id=123456)
@@ -291,8 +371,31 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
         TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         video_path = TEST_OUTPUT_DIR / "forward-placeholder.mp4"
         video_path.write_bytes(b"video-content")
-        await send_forward_video(bot, event, info, video_path)
+        return bot, event, info, video_path
 
+    async def test_sends_napcat_local_video_in_forward_node(self):
+        bot, event, info, video_path = self._video_fixture()
+        napcat_path = "/app/.config/QQ/NapCat/temp/video.mp4"
+        bot.call_api.return_value = {"file": napcat_path}
+        with patch.object(
+            plugin_config,
+            "haruka_bili_video_public_base_url",
+            "http://192.168.31.131:7070",
+        ):
+            await send_forward_video(bot, event, info, video_path)
+
+        download_call = bot.call_api.await_args
+        self.assertEqual(download_call.args, ("download_file",))
+        self.assertTrue(
+            download_call.kwargs["url"].startswith(
+                "http://192.168.31.131:7070/haruka/bili-video/"
+            )
+        )
+        self.assertEqual(download_call.kwargs["thread_count"], 1)
+        self.assertEqual(
+            download_call.kwargs["_timeout"],
+            Config().haruka_bili_video_timeout,
+        )
         call = bot.send_group_forward_msg.await_args
         self.assertEqual(call.kwargs["group_id"], 123456)
         self.assertEqual(
@@ -303,10 +406,46 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(messages), 2)
         video = messages[1]["data"]["content"][0]
         self.assertEqual(video.type, "video")
-        self.assertEqual(
-            video.data["file"],
-            "base64://dmlkZW8tY29udGVudA==",
-        )
+        self.assertEqual(video.data["file"], napcat_path)
+        self.assertFalse(_temporary_video_files)
+
+    async def test_missing_napcat_path_revokes_temporary_url(self):
+        bot, event, info, video_path = self._video_fixture()
+        bot.call_api.return_value = {}
+        with patch.object(
+            plugin_config,
+            "haruka_bili_video_public_base_url",
+            "http://192.168.31.131:7070",
+        ):
+            with self.assertRaisesRegex(BiliVideoError, "没有返回本地文件路径"):
+                await send_forward_video(bot, event, info, video_path)
+        bot.send_group_forward_msg.assert_not_awaited()
+        self.assertFalse(_temporary_video_files)
+
+    async def test_download_failure_revokes_temporary_url(self):
+        bot, event, info, video_path = self._video_fixture()
+        bot.call_api.side_effect = RuntimeError("download failed")
+        with patch.object(
+            plugin_config,
+            "haruka_bili_video_public_base_url",
+            "http://192.168.31.131:7070",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "download failed"):
+                await send_forward_video(bot, event, info, video_path)
+        self.assertFalse(_temporary_video_files)
+
+    async def test_forward_failure_leaves_no_temporary_url(self):
+        bot, event, info, video_path = self._video_fixture()
+        bot.call_api.return_value = {"file": "/tmp/video.mp4"}
+        bot.send_group_forward_msg.side_effect = RuntimeError("forward failed")
+        with patch.object(
+            plugin_config,
+            "haruka_bili_video_public_base_url",
+            "http://192.168.31.131:7070",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "forward failed"):
+                await send_forward_video(bot, event, info, video_path)
+        self.assertFalse(_temporary_video_files)
 
 
 if __name__ == "__main__":
