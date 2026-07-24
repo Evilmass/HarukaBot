@@ -18,7 +18,6 @@ from nonebot.rule import Rule
 from ..config import plugin_config
 from ..utils import get_path
 
-
 VIDEO_URL_RE = re.compile(
     r"https?://(?:www\.|m\.)?bilibili\.com/video/"
     r"(?:BV[0-9A-Za-z]{10}|av\d+)[0-9A-Za-z?&=_%./:+~#@-]*",
@@ -190,13 +189,9 @@ def get_dash_stream_candidates(
         return avc_compatible, int(item.get("bandwidth", 0))
 
     candidates = []
-    qualities = sorted(
-        {int(item.get("id", 0)) for item in allowed}, reverse=True
-    )
+    qualities = sorted({int(item.get("id", 0)) for item in allowed}, reverse=True)
     for quality in qualities:
-        same_quality = [
-            item for item in allowed if int(item.get("id", 0)) == quality
-        ]
+        same_quality = [item for item in allowed if int(item.get("id", 0)) == quality]
         candidates.append(max(same_quality, key=video_rank))
     audio = max(audios, key=lambda item: int(item.get("bandwidth", 0)))
     return candidates, audio
@@ -215,9 +210,7 @@ class BiliVideoDownloader:
         self.client = client
         self.max_bytes = plugin_config.haruka_bili_video_max_size_mb * 1024 * 1024
 
-    async def _api_get(
-        self, url: str, params: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def _api_get(self, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
         try:
             response = await self.client.get(url, params=params)
             response.raise_for_status()
@@ -270,47 +263,70 @@ class BiliVideoDownloader:
     ) -> int:
         last_error = "未知错误"
         for url in _stream_urls(stream):
-            size = 0
-            try:
-                # B 站的媒体 CDN 会拒绝不带 Range 的普通 GET 请求。
-                async with self._media_stream(
-                    url, "bytes=0-", referer
-                ) as response:
-                    response.raise_for_status()
-                    content_length = int(response.headers.get("content-length", 0))
-                    if content_length > self.max_bytes:
-                        raise BiliVideoError(
-                            "视频文件超过 "
-                            f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
-                        )
-                    with target.open("wb") as output:
-                        async for chunk in response.aiter_bytes(1024 * 1024):
-                            size += len(chunk)
-                            if size > self.max_bytes:
-                                raise BiliVideoError(
-                                    "视频文件超过 "
-                                    f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
-                                )
-                            output.write(chunk)
-                return size
-            except BiliVideoError:
-                target.unlink(missing_ok=True)
-                raise
-            except (httpx.HTTPError, OSError, ValueError) as error:
-                if isinstance(error, httpx.HTTPStatusError):
-                    host = error.request.url.host
-                    last_error = (
-                        f"HTTP {error.response.status_code}（{host}）"
-                    )
-                else:
-                    last_error = type(error).__name__
-                target.unlink(missing_ok=True)
+            # 收集所有待尝试的 URL：原始 URL + 备用 CDN 镜像
+            urls_to_try = [url]
+            for fallback_host in self._CDN_FALLBACK_HOSTS:
+                fallback_url = self._replace_cdn_host(url, fallback_host)
+                if fallback_url != url and fallback_url not in urls_to_try:
+                    urls_to_try.append(fallback_url)
+
+            for attempt_url in urls_to_try:
+                size = 0
+                try:
+                    # B 站的媒体 CDN 会拒绝不带 Range 的普通 GET 请求。
+                    async with self._media_stream(
+                        attempt_url, "bytes=0-", referer
+                    ) as response:
+                        response.raise_for_status()
+                        content_length = int(response.headers.get("content-length", 0))
+                        if content_length > self.max_bytes:
+                            raise BiliVideoError(
+                                "视频文件超过 "
+                                f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
+                            )
+                        with target.open("wb") as output:
+                            async for chunk in response.aiter_bytes(1024 * 1024):
+                                size += len(chunk)
+                                if size > self.max_bytes:
+                                    raise BiliVideoError(
+                                        "视频文件超过 "
+                                        f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
+                                    )
+                                output.write(chunk)
+                    return size
+                except BiliVideoError:
+                    target.unlink(missing_ok=True)
+                    raise
+                except (httpx.HTTPError, OSError, ValueError) as error:
+                    if isinstance(error, httpx.HTTPStatusError):
+                        host = error.request.url.host
+                        last_error = f"HTTP {error.response.status_code}（{host}）"
+                    else:
+                        last_error = type(error).__name__
+                    target.unlink(missing_ok=True)
         raise BiliVideoError(f"下载 B 站媒体流失败：{last_error}")
 
+    # 当主 CDN 返回 403 时可尝试的备用镜像域名
+    _CDN_FALLBACK_HOSTS = [
+        "upos-sz-mirrorali.bilivideo.com",
+        "upos-sz-mirrorhw.bilivideo.com",
+        "upos-sz-mirrorcos.bilivideo.com",
+    ]
+
+    @staticmethod
+    def _replace_cdn_host(url: str, new_host: str) -> str:
+        """将 URL 中的 CDN 主机名替换为指定的镜像主机名。"""
+        import re as _re
+
+        return _re.sub(
+            r"https?://[^/]+\.bilivideo\.com/",
+            f"https://{new_host}/",
+            url,
+            count=1,
+        )
+
     @asynccontextmanager
-    async def _media_stream(
-        self, url: str, byte_range: str, referer: str
-    ):
+    async def _media_stream(self, url: str, byte_range: str, referer: str):
         """使用视频页 Referer 访问 CDN，且不向 CDN 发送登录 Cookie。"""
         request = self.client.build_request(
             "GET",
@@ -319,6 +335,7 @@ class BiliVideoDownloader:
                 "Range": byte_range,
                 "User-Agent": DEFAULT_USER_AGENT,
                 "Referer": referer,
+                "Origin": "https://www.bilibili.com",
                 "Accept-Encoding": "identity",
             },
         )
@@ -334,22 +351,29 @@ class BiliVideoDownloader:
     ) -> Optional[int]:
         """通过单字节 Range 请求获取媒体流的完整大小。"""
         for url in _stream_urls(stream):
-            try:
-                async with self._media_stream(
-                    url, "bytes=0-0", referer
-                ) as response:
-                    response.raise_for_status()
-                    content_range = response.headers.get("content-range", "")
-                    if "/" in content_range:
-                        total = content_range.rsplit("/", 1)[-1]
-                        if total.isdigit():
-                            return int(total)
-                    if response.status_code == 200:
-                        content_length = response.headers.get("content-length")
-                        if content_length and content_length.isdigit():
-                            return int(content_length)
-            except (httpx.HTTPError, OSError, ValueError):
-                continue
+            urls_to_try = [url]
+            for fallback_host in self._CDN_FALLBACK_HOSTS:
+                fallback_url = self._replace_cdn_host(url, fallback_host)
+                if fallback_url != url and fallback_url not in urls_to_try:
+                    urls_to_try.append(fallback_url)
+
+            for attempt_url in urls_to_try:
+                try:
+                    async with self._media_stream(
+                        attempt_url, "bytes=0-0", referer
+                    ) as response:
+                        response.raise_for_status()
+                        content_range = response.headers.get("content-range", "")
+                        if "/" in content_range:
+                            total = content_range.rsplit("/", 1)[-1]
+                            if total.isdigit():
+                                return int(total)
+                        if response.status_code == 200:
+                            content_length = response.headers.get("content-length")
+                            if content_length and content_length.isdigit():
+                                return int(content_length)
+                except (httpx.HTTPError, OSError, ValueError):
+                    continue
         return None
 
     async def _select_fitting_dash_streams(
@@ -370,17 +394,14 @@ class BiliVideoDownloader:
                     )
                 return video, audio
         raise BiliVideoError(
-            "最低清晰度仍超过 "
-            f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
+            f"最低清晰度仍超过 {plugin_config.haruka_bili_video_max_size_mb} MB 限制"
         )
 
     async def _run_ffmpeg(self, inputs: Sequence[Path], output: Path) -> None:
         command: List[str] = [plugin_config.haruka_bili_video_ffmpeg, "-y"]
         for input_path in inputs:
             command.extend(["-i", str(input_path)])
-        command.extend(
-            ["-c", "copy", "-movflags", "+faststart", str(output)]
-        )
+        command.extend(["-c", "copy", "-movflags", "+faststart", str(output)])
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -388,9 +409,7 @@ class BiliVideoDownloader:
                 stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError as error:
-            raise BiliVideoError(
-                "未找到 FFmpeg，请安装后重启机器人"
-            ) from error
+            raise BiliVideoError("未找到 FFmpeg，请安装后重启机器人") from error
 
         try:
             _, stderr = await asyncio.wait_for(
@@ -414,23 +433,17 @@ class BiliVideoDownloader:
         output = directory / "video.mp4"
 
         if play_data.get("dash"):
-            video_stream, audio_stream = (
-                await self._select_fitting_dash_streams(
-                    play_data, info.canonical_url
-                )
+            video_stream, audio_stream = await self._select_fitting_dash_streams(
+                play_data, info.canonical_url
             )
             video_path = directory / "video.m4s"
             audio_path = directory / "audio.m4s"
             tasks = [
                 asyncio.create_task(
-                    self._download_stream(
-                        video_stream, video_path, info.canonical_url
-                    )
+                    self._download_stream(video_stream, video_path, info.canonical_url)
                 ),
                 asyncio.create_task(
-                    self._download_stream(
-                        audio_stream, audio_path, info.canonical_url
-                    )
+                    self._download_stream(audio_stream, audio_path, info.canonical_url)
                 ),
             ]
             try:
@@ -478,11 +491,7 @@ async def send_forward_video(
     info: VideoInfo,
     video_path: Path,
 ) -> None:
-    part = (
-        f"\n分P：P{info.page_number} {info.page_name}"
-        if info.page_count > 1
-        else ""
-    )
+    part = f"\n分P：P{info.page_number} {info.page_name}" if info.page_count > 1 else ""
     description = Message(
         f"{info.title}\nUP：{info.owner}{part}\n"
         f"时长：{_format_duration(info.duration)}\n{info.canonical_url}"
@@ -515,9 +524,7 @@ def _http_client_options() -> Dict[str, Any]:
     options: Dict[str, Any] = {
         "headers": headers,
         "follow_redirects": True,
-        "timeout": httpx.Timeout(
-            plugin_config.haruka_bili_video_timeout, connect=20
-        ),
+        "timeout": httpx.Timeout(plugin_config.haruka_bili_video_timeout, connect=20),
     }
     if plugin_config.haruka_proxy:
         options["proxies"] = plugin_config.haruka_proxy
@@ -528,9 +535,7 @@ async def _enabled_group(event: GroupMessageEvent) -> bool:
     return event.group_id in set(plugin_config.haruka_bili_video_groups)
 
 
-download_semaphore = asyncio.Semaphore(
-    plugin_config.haruka_bili_video_concurrency
-)
+download_semaphore = asyncio.Semaphore(plugin_config.haruka_bili_video_concurrency)
 bili_video = on_message(
     rule=Rule(_enabled_group),
     priority=20,
@@ -541,9 +546,7 @@ bili_video = on_message(
 @bili_video.handle()
 async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
     async with httpx.AsyncClient(**_http_client_options()) as client:
-        references = await resolve_video_references(
-            message_search_text(event), client
-        )
+        references = await resolve_video_references(message_search_text(event), client)
         references = references[: plugin_config.haruka_bili_video_max_links]
         if not references:
             return
@@ -565,13 +568,9 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
                         info, video_path = await downloader.download(
                             reference, Path(temporary_dir)
                         )
-                        await send_forward_video(
-                            bot, event, info, video_path
-                        )
+                        await send_forward_video(bot, event, info, video_path)
             except BiliVideoError as error:
-                logger.warning(
-                    f"B 站视频 {reference.key} 下载失败：{error}"
-                )
+                logger.warning(f"B 站视频 {reference.key} 下载失败：{error}")
                 await bot.send_group_msg(
                     group_id=event.group_id,
                     message=f"B 站视频下载失败：{error}",
