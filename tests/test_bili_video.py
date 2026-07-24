@@ -392,6 +392,7 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(download_call.kwargs["thread_count"], 1)
+        self.assertEqual(download_call.kwargs["headers"], "User-Agent: NapCat")
         self.assertEqual(
             download_call.kwargs["_timeout"],
             Config().haruka_bili_video_timeout,

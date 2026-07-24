@@ -686,7 +686,7 @@ async def send_forward_video(
                 "download_file",
                 url=video_url,
                 thread_count=1,
-                headers="",
+                headers="User-Agent: NapCat",
                 _timeout=plugin_config.haruka_bili_video_timeout,
             )
         except Exception as error:
