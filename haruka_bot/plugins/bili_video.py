@@ -263,8 +263,16 @@ class BiliVideoDownloader:
         )
 
     async def _download_stream(
-        self, stream: Dict[str, Any], target: Path, referer: str
+        self,
+        stream: Dict[str, Any],
+        target: Path,
+        referer: str,
+        log_id: Optional[str] = None,
+        stream_kind: Optional[str] = None,
     ) -> int:
+        scope = f"[B站视频][{log_id or target.name}]"
+        if stream_kind:
+            scope += f"[{stream_kind}]"
         last_error = "未知错误"
         for url in _stream_urls(stream):
             # 收集所有待尝试的 URL：原始 URL + 备用 CDN 镜像
@@ -276,6 +284,9 @@ class BiliVideoDownloader:
 
             for attempt_url in urls_to_try:
                 size = 0
+                attempt_started = time.perf_counter()
+                host = urlparse(attempt_url).hostname or "未知 CDN"
+                logger.info(f"{scope} 开始下载媒体流，CDN={host}")
                 try:
                     # B 站的媒体 CDN 会拒绝不带 Range 的普通 GET 请求。
                     async with self._media_stream(
@@ -297,6 +308,14 @@ class BiliVideoDownloader:
                                         f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
                                     )
                                 output.write(chunk)
+                    elapsed = time.perf_counter() - attempt_started
+                    size_mb = size / 1024 / 1024
+                    speed = size_mb / elapsed if elapsed > 0 else 0
+                    logger.info(
+                        f"{scope} 媒体流下载完成："
+                        f"{size_mb:.1f} MB，耗时 {elapsed:.2f} 秒，"
+                        f"平均 {speed:.1f} MB/s，CDN={host}"
+                    )
                     return size
                 except BiliVideoError:
                     target.unlink(missing_ok=True)
@@ -307,6 +326,11 @@ class BiliVideoDownloader:
                         last_error = f"HTTP {error.response.status_code}（{host}）"
                     else:
                         last_error = type(error).__name__
+                    elapsed = time.perf_counter() - attempt_started
+                    logger.warning(
+                        f"{scope} 媒体流下载尝试失败："
+                        f"{last_error}，耗时 {elapsed:.2f} 秒，CDN={host}"
+                    )
                     target.unlink(missing_ok=True)
         raise BiliVideoError(f"下载 B 站媒体流失败：{last_error}")
 
@@ -381,27 +405,61 @@ class BiliVideoDownloader:
         return None
 
     async def _select_fitting_dash_streams(
-        self, play_data: Dict[str, Any], referer: str
+        self,
+        play_data: Dict[str, Any],
+        referer: str,
+        log_id: str = "未知视频",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        selection_started = time.perf_counter()
         videos, audio = get_dash_stream_candidates(
             play_data, plugin_config.haruka_bili_video_quality
         )
+        probe_started = time.perf_counter()
         audio_size = await self._probe_stream_size(audio, referer)
+        logger.info(
+            f"[B站视频][{log_id}] 音频流大小探测完成："
+            f"{_format_size(audio_size)}，耗时 "
+            f"{time.perf_counter() - probe_started:.2f} 秒"
+        )
         for index, video in enumerate(videos):
+            probe_started = time.perf_counter()
             video_size = await self._probe_stream_size(video, referer)
+            quality = video.get("id", "未知")
+            logger.info(
+                f"[B站视频][{log_id}] 视频流大小探测完成："
+                f"清晰度 ID {quality}，{_format_size(video_size)}，耗时 "
+                f"{time.perf_counter() - probe_started:.2f} 秒"
+            )
             known_size = (audio_size or 0) + (video_size or 0)
+            total_size = (
+                audio_size + video_size
+                if audio_size is not None and video_size is not None
+                else None
+            )
             if known_size <= self.max_bytes:
                 if index:
                     logger.info(
-                        "B 站视频最高画质超过大小限制，"
+                        f"[B站视频][{log_id}] 最高画质超过大小限制，"
                         f"自动降级到清晰度 ID {video.get('id')}"
                     )
+                logger.info(
+                    f"[B站视频][{log_id}] DASH 流选择完成："
+                    f"清晰度 ID {quality}，预计合计 {_format_size(total_size)}，"
+                    f"耗时 {time.perf_counter() - selection_started:.2f} 秒"
+                )
                 return video, audio
         raise BiliVideoError(
             f"最低清晰度仍超过 {plugin_config.haruka_bili_video_max_size_mb} MB 限制"
         )
 
-    async def _run_ffmpeg(self, inputs: Sequence[Path], output: Path) -> None:
+    async def _run_ffmpeg(
+        self,
+        inputs: Sequence[Path],
+        output: Path,
+        log_id: str = "未知视频",
+    ) -> None:
+        ffmpeg_started = time.perf_counter()
+        logger.info(f"[B站视频][{log_id}] 开始 FFmpeg 无损合并")
         command: List[str] = [plugin_config.haruka_bili_video_ffmpeg, "-y"]
         for input_path in inputs:
             command.extend(["-i", str(input_path)])
@@ -428,26 +486,57 @@ class BiliVideoDownloader:
             detail = stderr.decode("utf-8", errors="replace")[-500:]
             logger.error(f"FFmpeg 合并 B 站视频失败：{detail}")
             raise BiliVideoError("FFmpeg 无法合并该视频")
+        output_size = output.stat().st_size if output.is_file() else None
+        logger.info(
+            f"[B站视频][{log_id}] FFmpeg 合并完成："
+            f"{_format_size(output_size)}，耗时 "
+            f"{time.perf_counter() - ffmpeg_started:.2f} 秒"
+        )
 
     async def download(
         self, reference: VideoReference, directory: Path
     ) -> Tuple[VideoInfo, Path]:
+        download_started = time.perf_counter()
+        log_id = reference.key[0]
+        stage_started = time.perf_counter()
         info = await self.get_video_info(reference)
+        log_id = info.bvid or log_id
+        logger.info(
+            f"[B站视频][{log_id}] 视频信息获取完成，耗时 "
+            f"{time.perf_counter() - stage_started:.2f} 秒"
+        )
+        stage_started = time.perf_counter()
         play_data = await self.get_play_data(info)
+        logger.info(
+            f"[B站视频][{log_id}] 播放地址获取完成，耗时 "
+            f"{time.perf_counter() - stage_started:.2f} 秒"
+        )
         output = directory / "video.mp4"
 
         if play_data.get("dash"):
             video_stream, audio_stream = await self._select_fitting_dash_streams(
-                play_data, info.canonical_url
+                play_data, info.canonical_url, log_id
             )
             video_path = directory / "video.m4s"
             audio_path = directory / "audio.m4s"
             tasks = [
                 asyncio.create_task(
-                    self._download_stream(video_stream, video_path, info.canonical_url)
+                    self._download_stream(
+                        video_stream,
+                        video_path,
+                        info.canonical_url,
+                        log_id,
+                        "视频流",
+                    )
                 ),
                 asyncio.create_task(
-                    self._download_stream(audio_stream, audio_path, info.canonical_url)
+                    self._download_stream(
+                        audio_stream,
+                        audio_path,
+                        info.canonical_url,
+                        log_id,
+                        "音频流",
+                    )
                 ),
             ]
             try:
@@ -462,14 +551,16 @@ class BiliVideoDownloader:
                     "视频文件超过 "
                     f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
                 )
-            await self._run_ffmpeg([video_path, audio_path], output)
+            await self._run_ffmpeg([video_path, audio_path], output, log_id)
         else:
             durl = play_data.get("durl") or []
             if not durl:
                 raise BiliVideoError("B 站没有返回可下载的视频流")
             source = directory / "video_source"
-            await self._download_stream(durl[0], source, info.canonical_url)
-            await self._run_ffmpeg([source], output)
+            await self._download_stream(
+                durl[0], source, info.canonical_url, log_id, "混合流"
+            )
+            await self._run_ffmpeg([source], output, log_id)
 
         if not output.is_file() or output.stat().st_size == 0:
             raise BiliVideoError("视频合并完成后没有生成有效文件")
@@ -478,6 +569,11 @@ class BiliVideoDownloader:
                 "合并后的视频超过 "
                 f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
             )
+        logger.info(
+            f"[B站视频][{log_id}] 下载与合并全部完成："
+            f"{_format_size(output.stat().st_size)}，总耗时 "
+            f"{time.perf_counter() - download_started:.2f} 秒"
+        )
         return info, output
 
 
@@ -487,6 +583,12 @@ def _format_duration(seconds: int) -> str:
     if hour:
         return f"{hour:02d}:{minute:02d}:{second:02d}"
     return f"{minute:02d}:{second:02d}"
+
+
+def _format_size(size: Optional[int]) -> str:
+    if size is None:
+        return "大小未知"
+    return f"{size / 1024 / 1024:.1f} MB"
 
 
 def _video_base64_uri(video_path: Path) -> str:
@@ -521,28 +623,53 @@ async def send_forward_video(
         f"{info.title}\nUP：{info.owner}{part}\n"
         f"时长：{_format_duration(info.duration)}\n{info.canonical_url}"
     )
+    size = video_path.stat().st_size
+    size_mb = size / 1024 / 1024
     loop = asyncio.get_running_loop()
+    encode_started = time.perf_counter()
+    logger.info(
+        f"[B站视频][{info.bvid}] 开始 Base64 编码：{size_mb:.1f} MB"
+    )
     video_uri = await loop.run_in_executor(None, _video_base64_uri, video_path)
+    encoded_size_mb = len(video_uri) / 1024 / 1024
+    logger.info(
+        f"[B站视频][{info.bvid}] Base64 编码完成："
+        f"{encoded_size_mb:.1f} MB，耗时 "
+        f"{time.perf_counter() - encode_started:.2f} 秒"
+    )
     video = Message(MessageSegment.video(video_uri))
     node_base = {"name": "HarukaBot", "uin": str(bot.self_id)}
-    size_mb = video_path.stat().st_size / 1024 / 1024
     logger.info(
-        f"正在发送 B 站视频 {info.bvid}（{size_mb:.1f} MB），"
+        f"[B站视频][{info.bvid}] 开始调用 OneBot 合并转发："
+        f"原文件 {size_mb:.1f} MB，Base64 {encoded_size_mb:.1f} MB，"
         f"OneBot 超时 {plugin_config.haruka_bili_video_timeout} 秒"
     )
-    await bot.send_group_forward_msg(
-        group_id=event.group_id,
-        messages=[
-            {
-                "type": "node",
-                "data": {**node_base, "content": description},
-            },
-            {
-                "type": "node",
-                "data": {**node_base, "content": video},
-            },
-        ],
-        _timeout=plugin_config.haruka_bili_video_timeout,
+    onebot_started = time.perf_counter()
+    try:
+        await bot.send_group_forward_msg(
+            group_id=event.group_id,
+            messages=[
+                {
+                    "type": "node",
+                    "data": {**node_base, "content": description},
+                },
+                {
+                    "type": "node",
+                    "data": {**node_base, "content": video},
+                },
+            ],
+            _timeout=plugin_config.haruka_bili_video_timeout,
+        )
+    except Exception as error:
+        logger.warning(
+            f"[B站视频][{info.bvid}] OneBot 合并转发失败："
+            f"耗时 {time.perf_counter() - onebot_started:.2f} 秒，"
+            f"异常类型 {type(error).__name__}：{error}"
+        )
+        raise
+    logger.info(
+        f"[B站视频][{info.bvid}] OneBot 合并转发成功，耗时 "
+        f"{time.perf_counter() - onebot_started:.2f} 秒"
     )
 
 
@@ -579,8 +706,18 @@ bili_video = on_message(
 @bili_video.handle()
 async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
     async with httpx.AsyncClient(**_http_client_options()) as client:
-        references = await resolve_video_references(message_search_text(event), client)
+        search_text = message_search_text(event)
+        detected_urls = extract_message_urls(search_text)
+        if not detected_urls:
+            return
+        resolve_started = time.perf_counter()
+        references = await resolve_video_references(search_text, client)
         references = references[: plugin_config.haruka_bili_video_max_links]
+        logger.info(
+            f"[B站视频] 群 {event.group_id} 链接解析完成："
+            f"检测 {len(detected_urls)} 个链接，识别 {len(references)} 个视频，耗时 "
+            f"{time.perf_counter() - resolve_started:.2f} 秒"
+        )
         if not references:
             return
 
@@ -596,8 +733,16 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
         _cleanup_stale_downloads(download_root)
 
         for reference in references:
+            task_started = time.perf_counter()
+            wait_started = time.perf_counter()
+            log_id = reference.key[0]
+            logger.info(f"[B站视频][{log_id}] 等待下载并发槽位")
             try:
                 async with download_semaphore:
+                    logger.info(
+                        f"[B站视频][{log_id}] 已取得下载并发槽位，等待 "
+                        f"{time.perf_counter() - wait_started:.2f} 秒"
+                    )
                     download_dir = download_root / f"download-{uuid.uuid4().hex[:12]}"
                     download_dir.mkdir(parents=True, exist_ok=True)
                     try:
@@ -605,6 +750,10 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
                             reference, download_dir
                         )
                         await send_forward_video(bot, event, info, video_path)
+                        logger.info(
+                            f"[B站视频][{info.bvid}] 整条处理链路完成，总耗时 "
+                            f"{time.perf_counter() - task_started:.2f} 秒"
+                        )
                     finally:
                         # 视频内容已随 OneBot 请求传输，不再依赖 NapCat 读取本地路径。
                         shutil.rmtree(download_dir, ignore_errors=True)

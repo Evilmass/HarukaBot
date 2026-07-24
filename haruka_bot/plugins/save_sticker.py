@@ -1,5 +1,4 @@
-from httpx import AsyncClient
-from nonebot import logger, on_message
+from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent, MessageSegment
 from nonebot.plugin import PluginMetadata
 
@@ -34,25 +33,24 @@ async def handle_face_extraction(bot: Bot, event: MessageEvent):
         for seg in original_message:
             logger.debug(f"seg: {seg} type: {seg.type}")
             if seg.type == "image":
-                content = MessageSegment.text("表情：") + MessageSegment.image(
-                    seg.data["url"], type_=0
-                )
+                image_source = seg.data.get("url") or seg.data.get("file")
+                if not image_source:
+                    continue
+                image_url = str(image_source)
                 # 用于 .gif 格式的表情包保存，加上一层跳转防止可能的检测
                 url = (
-                    str(seg.data["url"])
+                    image_url
                     .replace("https://gchat.qpic.cn", TARGET_REDIRECT_URL)
                     .replace("https://multimedia.nt.qq.com.cn", TARGET_REDIRECT_URL_NT)
                 )
-                # async with AsyncClient() as client:
-                #     # @deprecated 用于 .gif 格式的表情包保存，加上一层短链接防止可能的检测
-                #     url = str(seg.data["url"]).replace("https://gchat.qpic.cn", TARGET_REDIRECT_URL)
-                #     try:
-                #         req = await client.get(url=url, timeout=3000)
-                #         result = req.json()
-                #         data = result.get("url")
-                #     except Exception as e:
-                #         data = "原始链接服务暂时不可用..."
-                await bot.send(event, content + "原始链接：" + url)
+                content = Message(
+                    [
+                        MessageSegment.text("表情："),
+                        MessageSegment.image(image_source, type_=0),
+                        MessageSegment.text(f"原始链接：{url}"),
+                    ]
+                )
+                await bot.send(event, content)
                 return
         await bot.send(event, "未在回复内容中检测到表情...")
     # 如果没有回复消息

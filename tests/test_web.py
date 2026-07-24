@@ -80,6 +80,7 @@ class WebSecurityTests(unittest.TestCase):
             self.assertEqual(static.status_code, 200)
             self.assertEqual(static.headers["X-Content-Type-Options"], "nosniff")
             self.assertIn("AUTO_REFRESH_INTERVAL_MS", static.text)
+            self.assertIn("subscriptionsInitialized", static.text)
             self.assertIn("live_status", static.text)
             self.assertIn("target_type", static.text)
 

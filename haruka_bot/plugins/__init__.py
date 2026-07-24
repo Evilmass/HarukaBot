@@ -3,6 +3,7 @@ from . import auto_delete  # noqa: F401
 from . import bili_video  # noqa: F401
 from . import help  # noqa: F401
 from . import live_duration  # noqa: F401
+from . import save_sticker  # noqa: F401
 from . import server_ip  # noqa: F401
 from .at import at_off, at_on  # noqa: F401
 from .dynamic import dynamic_off, dynamic_on  # noqa: F401

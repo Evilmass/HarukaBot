@@ -3,6 +3,7 @@ const state = {
   bots: [],
   editing: null,
   loading: false,
+  subscriptionsInitialized: false,
   optionsLoading: false,
   mutationLoading: false,
   exporting: false,
@@ -85,6 +86,7 @@ function showLogin(message = "") {
   state.subscriptionController = null;
   state.optionsController = null;
   state.loading = false;
+  state.subscriptionsInitialized = false;
   state.optionsLoading = false;
   state.items = [];
   state.total = 0;
@@ -117,7 +119,8 @@ function toast(message, type = "success") {
 
 function setLoading(loading) {
   state.loading = loading;
-  $("#loading-state").classList.toggle("hidden", !loading);
+  const initialLoading = loading && !state.subscriptionsInitialized;
+  $("#loading-state").classList.toggle("hidden", !initialLoading);
   updateBusyState();
   renderPagination();
 }
@@ -298,15 +301,16 @@ function render() {
   $("#stat-enabled").textContent = state.enabledTotal;
   $("#stat-bots").textContent = state.bots.filter((bot) => bot.online).length;
 
-  const empty = !state.loading && items.length === 0;
+  const initialLoading = state.loading && !state.subscriptionsInitialized;
+  const empty = state.subscriptionsInitialized && items.length === 0;
   $("#empty-state").classList.toggle("hidden", !empty);
   $("#desktop-table").classList.toggle(
     "hidden",
-    state.loading || empty,
+    initialLoading || empty,
   );
   $("#mobile-list").classList.toggle(
     "hidden",
-    state.loading || empty,
+    initialLoading || empty,
   );
   renderTable(items);
   renderMobile(items);
@@ -350,7 +354,7 @@ function renderBulkToolbar() {
 
 function renderPagination() {
   const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
-  const hidden = state.loading || state.total === 0;
+  const hidden = !state.subscriptionsInitialized || state.total === 0;
   $("#pagination").classList.toggle("hidden", hidden);
   $("#page-size-input").value = String(state.pageSize);
   $("#page-info").textContent =
@@ -399,6 +403,7 @@ async function loadSubscriptions() {
     state.enabledTotal = payload.summary_enabled_total;
     state.page = payload.page;
     state.pageSize = payload.page_size;
+    state.subscriptionsInitialized = true;
     render();
     return true;
   } catch (error) {
@@ -408,6 +413,7 @@ async function loadSubscriptions() {
   } finally {
     if (requestId === state.subscriptionRequestId) {
       state.subscriptionController = null;
+      state.subscriptionsInitialized = true;
       setLoading(false);
       render();
     }
