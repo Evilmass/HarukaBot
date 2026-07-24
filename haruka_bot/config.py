@@ -48,6 +48,9 @@ class Config(BaseSettings):
     haruka_bili_video_concurrency: int = 2
     haruka_bili_video_ffmpeg: str = "ffmpeg"
     haruka_bili_video_timeout: int = 600
+    haruka_bili_video_compress_enabled: bool = True
+    haruka_bili_video_compress_min_bitrate_kbps: int = 500
+    haruka_bili_video_compress_preset: str = "veryfast"
     # 频道管理员身份组
     haruka_guild_admin_roles: List[str] = ["频道主", "超级管理员"]
     ignore_group: Optional[List[int]]
@@ -72,6 +75,7 @@ class Config(BaseSettings):
         "haruka_bili_video_max_links",
         "haruka_bili_video_concurrency",
         "haruka_bili_video_timeout",
+        "haruka_bili_video_compress_min_bitrate_kbps",
     )
     def positive_bili_video_setting(cls, v: int):
         return max(v, 1)

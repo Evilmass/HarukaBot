@@ -1,14 +1,13 @@
 import asyncio
 import json
 import re
-import secrets
 import shutil
 import time
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -44,46 +43,60 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-VIDEO_DOWNLOAD_ROUTE = "/haruka/bili-video/{token}/video.mp4"
-VIDEO_MESSAGE_SAFE_LIMIT_MB = 100
-VIDEO_MESSAGE_SAFE_LIMIT_BYTES = VIDEO_MESSAGE_SAFE_LIMIT_MB * 1024 * 1024
-_temporary_video_files: Dict[str, Path] = {}
+# 视频文件通过 HTTP 提供给 OneBot 客户端下载，NapCat 在合并转发中引用此 URL
+VIDEO_SERVE_PREFIX = "/haruka/bili-video/files"
+# 视频文件服务根目录，由 handle_bili_video 在处理时设置
+_video_serve_dir: Optional[Path] = None
 
 
 class BiliVideoError(RuntimeError):
     """可安全展示给群聊用户的下载错误。"""
 
 
-async def _serve_temporary_video(token: str):
-    video_path = _temporary_video_files.get(token)
-    if video_path is None or not video_path.is_file():
-        raise HTTPException(status_code=404, detail="视频不存在或下载地址已失效")
+def _set_video_serve_dir(directory: Path) -> None:
+    """设置视频文件 HTTP 服务的根目录。"""
+    global _video_serve_dir
+    _video_serve_dir = directory
+
+
+async def _serve_video_file(filename: str):
+    """提供视频文件下载（供 OneBot 客户端在合并转发中引用）。"""
+    if _video_serve_dir is None:
+        raise HTTPException(status_code=503, detail="视频服务未就绪")
+    video_path = (_video_serve_dir / filename).resolve()
+    serve_root = _video_serve_dir.resolve()
+    # 防止路径穿越
+    if not str(video_path).startswith(str(serve_root)):
+        raise HTTPException(status_code=404, detail="视频不存在")
+    if not video_path.is_file():
+        raise HTTPException(status_code=404, detail="视频不存在")
     return FileResponse(
         video_path,
         media_type="video/mp4",
-        filename="video.mp4",
+        filename=video_path.name,
         headers={"Cache-Control": "no-store"},
     )
 
 
-def _register_video_download_route() -> None:
+def _register_video_serve_route() -> None:
+    """注册视频文件静态服务路由（永久路由，不使用临时 token）。"""
     try:
         app = nonebot.get_app()
     except Exception as error:
-        logger.warning(f"无法注册 B 站视频临时下载路由：{error}")
+        logger.warning(f"无法注册 B 站视频文件服务路由：{error}")
         return
-    if getattr(app.state, "haruka_bili_video_route_registered", False):
+    if getattr(app.state, "haruka_bili_video_serve_registered", False):
         return
     app.add_api_route(
-        VIDEO_DOWNLOAD_ROUTE,
-        _serve_temporary_video,
+        f"{VIDEO_SERVE_PREFIX}/{{filename:path}}",
+        _serve_video_file,
         methods=["GET"],
         include_in_schema=False,
     )
-    app.state.haruka_bili_video_route_registered = True
+    app.state.haruka_bili_video_serve_registered = True
 
 
-_register_video_download_route()
+_register_video_serve_route()
 
 
 @dataclass(frozen=True)
@@ -186,6 +199,108 @@ async def resolve_video_references(
             seen.add(reference.key)
             references.append(reference)
     return references
+
+
+def _extract_bili_ids_from_dict(data: dict, max_depth: int = 5) -> List[str]:
+    """从 JSON 字典中递归提取 B 站视频标识（完整 URL、BV 号、av 号、短链接）。
+
+    返回可直接交由现有解析管线处理的 URL 列表。
+    """
+    if max_depth <= 0 or not isinstance(data, dict):
+        return []
+
+    result: List[str] = []
+
+    # 1) 检查常见字段中的 B 站链接
+    for key in ("url", "qqdocurl", "jumpUrl", "jump_url", "link", "share_url"):
+        val = data.get(key)
+        if isinstance(val, str) and val:
+            if VIDEO_URL_RE.search(val) or SHORT_URL_RE.search(val):
+                result.append(val)
+
+    # 2) 直接存储的 BV 号 / av 号字段
+    for key in ("bvid", "BVId", "bvid_id", "video_id"):
+        val = data.get(key)
+        if isinstance(val, str) and VIDEO_ID_RE.match(val.strip()):
+            result.append(f"https://www.bilibili.com/video/{val.strip()}")
+
+    for key in ("aid", "avid", "AVId", "av_id"):
+        val = data.get(key)
+        if isinstance(val, (int, str)):
+            aid_str = str(val).strip()
+            if aid_str.isdigit():
+                result.append(f"https://www.bilibili.com/video/av{aid_str}")
+
+    # 3) 搜索任意字符串字段中内嵌的 BV/av 号
+    bv_pattern = re.compile(r"(BV[0-9A-Za-z]{10})")
+    av_pattern = re.compile(r"(av\d+)", re.IGNORECASE)
+    for val in data.values():
+        if isinstance(val, str) and len(val) >= 5:
+            for match in bv_pattern.finditer(val):
+                result.append(f"https://www.bilibili.com/video/{match.group(1)}")
+            for match in av_pattern.finditer(val):
+                result.append(f"https://www.bilibili.com/video/{match.group(1)}")
+
+    # 4) 递归搜索嵌套对象和数组
+    for value in data.values():
+        if isinstance(value, dict):
+            result.extend(_extract_bili_ids_from_dict(value, max_depth - 1))
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    result.extend(_extract_bili_ids_from_dict(item, max_depth - 1))
+
+    return result
+
+
+def extract_miniapp_video_urls(event: GroupMessageEvent) -> List[str]:
+    """从群消息的小程序 / JSON 卡片中提取 B 站视频链接。
+
+    QQ 群聊中的 B 站视频分享通常以 ``json``（小程序）或 ``miniapp``
+    消息段形式出现。本函数解析这些消息段内的 JSON 数据，查找
+    B 站视频 URL、BV 号或 av 号，并将其转化为标准视频链接供后续
+    下载管线使用。
+    """
+    urls: List[str] = []
+    for segment in event.message:
+        seg_type = getattr(segment, "type", "")
+        if seg_type not in ("json", "miniapp"):
+            continue
+
+        # OneBot v11: json/miniapp 消息段的 data 字段包含 JSON 字符串
+        raw_data = segment.data.get("data", "")
+        if not raw_data:
+            # 某些实现可能直接使用 segment.data
+            inner = dict(segment.data)
+        else:
+            try:
+                inner = json.loads(raw_data)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        if isinstance(inner, dict):
+            # 优先搜索 meta.detail_1（B 站小程序的标准结构）
+            meta = inner.get("meta") if isinstance(inner.get("meta"), dict) else {}
+            detail = meta.get("detail_1") if isinstance(meta, dict) else {}
+            if isinstance(detail, dict):
+                urls.extend(_extract_bili_ids_from_dict(detail))
+
+            # 再从顶层字段搜索（兜底）
+            urls.extend(_extract_bili_ids_from_dict(inner))
+
+    # 去重，保持顺序
+    seen: set = set()
+    result: List[str] = []
+    for url in urls:
+        cleaned = url.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            result.append(cleaned)
+
+    if result:
+        logger.info(f"[B站视频] 从小程序卡片识别到 {len(result)} 个视频：{result}")
+
+    return result
 
 
 def message_search_text(event: GroupMessageEvent) -> str:
@@ -630,23 +745,21 @@ def _format_size(size: Optional[int]) -> str:
     return f"{size / 1024 / 1024:.1f} MB"
 
 
-@contextmanager
-def _temporary_video_url(video_path: Path) -> Iterator[str]:
+def _build_video_url(relative_path: str) -> str:
+    """构建视频文件的公开 HTTP URL。"""
     base_url = plugin_config.haruka_bili_video_public_base_url
     if not base_url:
         raise BiliVideoError(
-            "未配置 HARUKA_BILI_VIDEO_PUBLIC_BASE_URL，"
-            "无法让 OneBot 客户端下载视频"
+            "未配置 HARUKA_BILI_VIDEO_PUBLIC_BASE_URL，无法让 OneBot 客户端获取视频"
         )
-    token = secrets.token_urlsafe(32)
-    _temporary_video_files[token] = video_path
-    try:
-        yield (
-            f"{base_url.rstrip('/')}/haruka/bili-video/"
-            f"{token}/video.mp4"
-        )
-    finally:
-        _temporary_video_files.pop(token, None)
+    return f"{base_url.rstrip('/')}{VIDEO_SERVE_PREFIX}/{relative_path}"
+
+
+async def _delayed_cleanup(directory: Path, delay_seconds: float = 300) -> None:
+    """延迟清理下载目录，给 OneBot 客户端足够时间下载视频文件。"""
+    await asyncio.sleep(delay_seconds)
+    shutil.rmtree(directory, ignore_errors=True)
+    logger.debug(f"已清理视频下载目录：{directory}")
 
 
 def _cleanup_stale_downloads(download_root: Path, min_age_seconds: int = 300) -> None:
@@ -655,7 +768,7 @@ def _cleanup_stale_downloads(download_root: Path, min_age_seconds: int = 300) ->
         return
     now = time.time()
     for child in download_root.iterdir():
-        if child.is_dir() and child.name.startswith("download-"):
+        if child.is_dir():
             try:
                 if now - child.stat().st_mtime > min_age_seconds:
                     shutil.rmtree(child, ignore_errors=True)
@@ -664,122 +777,175 @@ def _cleanup_stale_downloads(download_root: Path, min_age_seconds: int = 300) ->
                 pass
 
 
+async def compress_video(
+    input_path: Path,
+    duration_seconds: int,
+    log_id: str,
+    target_bytes: int,
+    min_bitrate_bps: int,
+) -> Path:
+    """使用 FFmpeg 重新编码视频，使其大小不超过目标值。
+
+    根据视频时长计算目标码率，单次编码输出。
+    若压缩后仍超过限制，会以更低的码率重试一次。
+    """
+    duration = max(duration_seconds, 1)
+    audio_bitrate_bps = 128_000
+    # 留 1% 安全余量
+    target_bits = int(target_bytes * 8 * 0.99)
+    audio_bits = audio_bitrate_bps * duration
+    video_bitrate_bps = max(
+        (target_bits - audio_bits) // duration,
+        min_bitrate_bps,
+    )
+
+    output_path = input_path.parent / "compressed.mp4"
+    ffmpeg = plugin_config.haruka_bili_video_ffmpeg
+
+    async def _run_compress(vb: int) -> bool:
+        """执行单次 FFmpeg 压缩，返回是否在目标大小内。"""
+        preset = plugin_config.haruka_bili_video_compress_preset
+        command = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(input_path),
+            "-c:v",
+            "libx264",
+            "-preset",
+            preset,
+            "-b:v",
+            str(vb),
+            "-maxrate",
+            str(int(vb * 1.5)),
+            "-bufsize",
+            str(int(vb * 2)),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        compress_started = time.perf_counter()
+        logger.info(
+            f"[B站视频][{log_id}] 开始压缩视频："
+            f"原始 {_format_size(input_path.stat().st_size)}，"
+            f"目标 ≤{target_bytes / 1024 / 1024:.0f} MB，"
+            f"视频码率 {vb / 1000:.0f} kbps，"
+            f"preset={preset}"
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as error:
+            raise BiliVideoError("未找到 FFmpeg，请安装后重启机器人") from error
+
+        try:
+            _, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=plugin_config.haruka_bili_video_timeout,
+            )
+        except asyncio.TimeoutError as error:
+            process.kill()
+            await process.communicate()
+            raise BiliVideoError("FFmpeg 压缩视频超时") from error
+
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace")[-500:]
+            logger.error(f"FFmpeg 压缩 B 站视频失败：{detail}")
+            raise BiliVideoError("FFmpeg 无法压缩该视频")
+
+        output_size = output_path.stat().st_size if output_path.is_file() else 0
+        elapsed = time.perf_counter() - compress_started
+        logger.info(
+            f"[B站视频][{log_id}] 压缩完成："
+            f"{_format_size(output_size)}，耗时 {elapsed:.2f} 秒"
+        )
+        return output_size > 0 and output_size <= target_bytes
+
+    # 第一次尝试
+    if await _run_compress(video_bitrate_bps):
+        return output_path
+
+    # 重试：码率降至当前的 70%，但不低于最低码率
+    retry_bitrate = max(int(video_bitrate_bps * 0.7), min_bitrate_bps)
+    if retry_bitrate < video_bitrate_bps:
+        logger.warning(
+            f"[B站视频][{log_id}] 压缩后仍超限，"
+            f"降低码率重试：{retry_bitrate / 1000:.0f} kbps"
+        )
+        try:
+            if await _run_compress(retry_bitrate):
+                return output_path
+        except BiliVideoError:
+            pass  # 重试失败，抛出最终错误
+
+    raise BiliVideoError(f"视频压缩后仍超过 {target_bytes / 1024 / 1024:.0f} MB 限制")
+
+
 async def send_video(
     bot: Bot,
     event: GroupMessageEvent,
     info: VideoInfo,
     video_path: Path,
+    compress_label: str = "",
 ) -> None:
+    """通过合并转发消息发送视频（视频节点 + 描述节点）。"""
     part = f"\n分P：P{info.page_number} {info.page_name}" if info.page_count > 1 else ""
-    description = Message(
-        f"{info.title}\nUP：{info.owner}{part}\n"
+    description = (
+        f"{compress_label}{info.title}\nUP：{info.owner}{part}\n"
         f"时长：{_format_duration(info.duration)}\n{info.canonical_url}"
     )
     size = video_path.stat().st_size
     size_mb = size / 1024 / 1024
-    download_started = time.perf_counter()
-    with _temporary_video_url(video_path) as video_url:
-        logger.info(
-            f"[B站视频][{info.bvid}] 开始让 NapCat 下载临时视频："
-            f"{size_mb:.1f} MB"
-        )
-        try:
-            download_result = await bot.call_api(
-                "download_file",
-                url=video_url,
-                _timeout=plugin_config.haruka_bili_video_timeout,
-            )
-        except Exception as error:
-            logger.warning(
-                f"[B站视频][{info.bvid}] NapCat 下载临时视频失败："
-                f"耗时 {time.perf_counter() - download_started:.2f} 秒，"
-                f"异常类型 {type(error).__name__}：{error}"
-            )
-            raise
-    napcat_video_path = (
-        download_result.get("file") if isinstance(download_result, dict) else None
-    )
-    if not napcat_video_path:
-        raise BiliVideoError("NapCat 下载视频后没有返回本地文件路径")
-    logger.info(
-        f"[B站视频][{info.bvid}] NapCat 下载临时视频完成，耗时 "
-        f"{time.perf_counter() - download_started:.2f} 秒"
-    )
 
-    if size > VIDEO_MESSAGE_SAFE_LIMIT_BYTES:
-        file_name = (
-            f"{info.bvid}-P{info.page_number}.mp4"
-            if info.page_count > 1
-            else f"{info.bvid}.mp4"
-        )
-        upload_started = time.perf_counter()
-        logger.info(
-            f"[B站视频][{info.bvid}] 视频 {size_mb:.1f} MB 超过 "
-            f"{VIDEO_MESSAGE_SAFE_LIMIT_MB} MB 安全阈值，开始上传群文件"
-        )
-        try:
-            await bot.call_api(
-                "upload_group_file",
-                group_id=event.group_id,
-                file=str(napcat_video_path),
-                name=file_name,
-                _timeout=plugin_config.haruka_bili_video_timeout,
-            )
-        except Exception as error:
-            logger.warning(
-                f"[B站视频][{info.bvid}] 群文件上传失败："
-                f"耗时 {time.perf_counter() - upload_started:.2f} 秒，"
-                f"异常类型 {type(error).__name__}：{error}"
-            )
-            raise
-        logger.info(
-            f"[B站视频][{info.bvid}] 群文件上传完成：{file_name}，耗时 "
-            f"{time.perf_counter() - upload_started:.2f} 秒"
-        )
-    else:
-        video = Message(MessageSegment.video(str(napcat_video_path)))
-        logger.info(
-            f"[B站视频][{info.bvid}] 开始发送普通群视频："
-            f"视频 {size_mb:.1f} MB，"
-            f"OneBot 超时 {plugin_config.haruka_bili_video_timeout} 秒"
-        )
-        onebot_started = time.perf_counter()
-        try:
-            await bot.send_group_msg(
-                group_id=event.group_id,
-                message=video,
-                _timeout=plugin_config.haruka_bili_video_timeout,
-            )
-        except Exception as error:
-            logger.warning(
-                f"[B站视频][{info.bvid}] 普通群视频发送失败："
-                f"耗时 {time.perf_counter() - onebot_started:.2f} 秒，"
-                f"异常类型 {type(error).__name__}：{error}"
-            )
-            raise
-        logger.info(
-            f"[B站视频][{info.bvid}] 普通群视频发送成功，耗时 "
-            f"{time.perf_counter() - onebot_started:.2f} 秒"
-        )
+    # 构建视频文件的公开 HTTP URL（按 BVID 组织的固定路径）
+    relative = f"{info.bvid}/video.mp4"
+    video_url = _build_video_url(relative)
 
-    description_started = time.perf_counter()
-    logger.info(f"[B站视频][{info.bvid}] 媒体发送完成，开始发送视频说明")
+    # 构建合并转发消息节点：节点 1 描述，节点 2 视频
+    nodes = [
+        {
+            "type": "node",
+            "data": {
+                "name": "HarukaBot",
+                "uin": bot.self_id,
+                "content": description,
+            },
+        },
+        {
+            "type": "node",
+            "data": {
+                "name": "HarukaBot",
+                "uin": bot.self_id,
+                "content": Message(MessageSegment.video(video_url)),
+            },
+        },
+    ]
+
+    send_started = time.perf_counter()
+    logger.info(f"[B站视频][{info.bvid}] 开始发送合并转发消息：视频 {size_mb:.1f} MB")
     try:
-        await bot.send_group_msg(
+        await bot.send_group_forward_msg(
             group_id=event.group_id,
-            message=description,
+            messages=nodes,
             _timeout=plugin_config.haruka_bili_video_timeout,
         )
     except Exception as error:
         logger.warning(
-            f"[B站视频][{info.bvid}] 视频说明发送失败："
-            f"耗时 {time.perf_counter() - description_started:.2f} 秒，"
+            f"[B站视频][{info.bvid}] 合并转发消息发送失败："
+            f"耗时 {time.perf_counter() - send_started:.2f} 秒，"
             f"异常类型 {type(error).__name__}：{error}"
         )
         raise
     logger.info(
-        f"[B站视频][{info.bvid}] 视频说明发送完成，耗时 "
-        f"{time.perf_counter() - description_started:.2f} 秒"
+        f"[B站视频][{info.bvid}] 合并转发消息发送成功，耗时 "
+        f"{time.perf_counter() - send_started:.2f} 秒"
     )
 
 
@@ -818,10 +984,17 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
     async with httpx.AsyncClient(**_http_client_options()) as client:
         search_text = message_search_text(event)
         detected_urls = extract_message_urls(search_text)
+        # 从小程序卡片补充 B 站视频链接
+        miniapp_urls = extract_miniapp_video_urls(event)
+        for url in miniapp_urls:
+            if url not in detected_urls:
+                detected_urls.append(url)
         if not detected_urls:
             return
+        # 合并文本搜索和小程序识别的结果，统一解析短链接
+        combined_text = search_text + "\n" + "\n".join(miniapp_urls)
         resolve_started = time.perf_counter()
-        references = await resolve_video_references(search_text, client)
+        references = await resolve_video_references(combined_text, client)
         references = references[: plugin_config.haruka_bili_video_max_links]
         logger.info(
             f"[B站视频] 群 {event.group_id} 链接解析完成："
@@ -838,6 +1011,7 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
         downloader = BiliVideoDownloader(client)
         download_root = Path(get_path("bili_video"))
         download_root.mkdir(parents=True, exist_ok=True)
+        _set_video_serve_dir(download_root)
 
         # 清理上次异常退出可能残留的旧下载目录
         _cleanup_stale_downloads(download_root)
@@ -859,14 +1033,65 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
                         info, video_path = await downloader.download(
                             reference, download_dir
                         )
-                        await send_video(bot, event, info, video_path)
+                        bvid = info.bvid or log_id
+                        # 将下载目录重命名为 BVID，使 HTTP URL 可预测
+                        video_dir = download_root / bvid
+                        if video_dir.exists():
+                            shutil.rmtree(video_dir, ignore_errors=True)
+                        shutil.move(str(download_dir), str(video_dir))
+                        download_dir = video_dir
+                        video_path = video_dir / "video.mp4"
+
+                        # 视频超过大小限制时尝试压缩
+                        max_bytes = (
+                            plugin_config.haruka_bili_video_max_size_mb * 1024 * 1024
+                        )
+                        compress_label = ""
+                        if (
+                            plugin_config.haruka_bili_video_compress_enabled
+                            and video_path.stat().st_size > max_bytes
+                        ):
+                            min_bitrate = (
+                                plugin_config.haruka_bili_video_compress_min_bitrate_kbps
+                                * 1000
+                            )
+                            compressed_path = await compress_video(
+                                video_path,
+                                info.duration,
+                                bvid,
+                                max_bytes,
+                                min_bitrate,
+                            )
+                            video_path = compressed_path
+                            compress_label = "（已压缩）"
+
+                        # 最终大小检查
+                        if video_path.stat().st_size > max_bytes:
+                            raise BiliVideoError(
+                                f"视频压缩后仍超过 "
+                                f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
+                            )
+
+                        await send_video(bot, event, info, video_path, compress_label)
+
+                        # 清理临时流文件（保留最终视频供 HTTP serving）
+                        for tmp in video_dir.glob("*.m4s"):
+                            tmp.unlink(missing_ok=True)
+                        for tmp in video_dir.glob("compressed.mp4"):
+                            if tmp != video_path:
+                                tmp.unlink(missing_ok=True)
+
+                        # 延迟清理整个目录（给 OneBot 客户端足够时间下载）
+                        asyncio.create_task(_delayed_cleanup(video_dir))
+
                         logger.info(
-                            f"[B站视频][{info.bvid}] 整条处理链路完成，总耗时 "
+                            f"[B站视频][{bvid}] 整条处理链路完成，总耗时 "
                             f"{time.perf_counter() - task_started:.2f} 秒"
                         )
-                    finally:
-                        # NapCat 已下载到自己的临时目录，不再依赖 HarukaBot 文件。
+                    except Exception:
+                        # 下载/处理失败时立即清理
                         shutil.rmtree(download_dir, ignore_errors=True)
+                        raise
             except BiliVideoError as error:
                 logger.warning(f"B 站视频 {reference.key} 处理失败：{error}")
                 await bot.send_group_msg(
@@ -878,10 +1103,7 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
                 try:
                     await bot.send_group_msg(
                         group_id=event.group_id,
-                        message=(
-                            "B 站视频发送超时，OneBot 客户端可能仍在处理中，"
-                            "请先确认群内是否收到视频"
-                        ),
+                        message="B 站视频发送超时，请稍后重试",
                     )
                 except NetworkError as notify_error:
                     logger.warning(f"B 站视频发送超时提示发送失败：{notify_error}")
