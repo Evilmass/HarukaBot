@@ -18,6 +18,7 @@ from nonebot.log import logger
 from ...config import plugin_config
 from ...database import DB as db
 from ...database import dynamic_offset as offset
+from ...dynamic_selection import get_latest_dynamic_id, select_new_dynamics
 from ...utils import get_dynamic_screenshot, safe_send, scheduler
 
 
@@ -102,67 +103,65 @@ async def dy_sched():
     if uid not in offset:  # 已删除
         return
     elif offset[uid] == -1:  # 第一次爬取
-        if len(dynamics) == 1:  # 只有一条动态
-            offset[uid] = int(dynamics[0].extend.dyn_id_str)
-        else:  # 第一个可能是置顶动态，但置顶也可能是最新一条，所以取前两条的最大值
-            offset[uid] = max(
-                int(dynamics[0].extend.dyn_id_str), int(dynamics[1].extend.dyn_id_str)
-            )
+        # 首次只建立整页最新基线，不补发历史动态；置顶和接口排序不会影响结果。
+        offset[uid] = get_latest_dynamic_id(dynamics)
         return
 
-    dynamic = None
-    for dynamic in sorted(
-        dynamics, key=lambda x: int(x.extend.dyn_id_str)
-    ):  # 动态从旧到新排列
+    selected_dynamics = select_new_dynamics(
+        dynamics,
+        offset[uid],
+        plugin_config.haruka_dynamic_max_push_per_poll,
+    )
+    for dynamic in selected_dynamics:
         dynamic_id = int(dynamic.extend.dyn_id_str)
-        if dynamic_id > offset[uid]:
-            logger.info(f"检测到新动态（{dynamic_id}）：{name}（{uid}）")
-            image, err = await get_dynamic_screenshot(dynamic_id)
-            url = f"https://t.bilibili.com/{dynamic_id}"
-            if image is None:
-                logger.debug(f"动态不存在，已跳过：{url}")
-                return
-            elif dynamic.card_type in [
-                DynamicType.live_rcmd,
-                DynamicType.live,
-                DynamicType.ad,
-                DynamicType.banner,
-            ]:
-                logger.debug(f"无需推送的动态 {dynamic.card_type}，已跳过：{url}")
-                offset[uid] = dynamic_id
-                return
+        logger.info(f"检测到新动态（{dynamic_id}）：{name}（{uid}）")
+        image, err = await get_dynamic_screenshot(dynamic_id)
+        url = f"https://t.bilibili.com/{dynamic_id}"
+        if image is None:
+            logger.debug(f"动态不存在，已跳过：{url}")
+            offset[uid] = dynamic_id
+            continue
+        elif dynamic.card_type in [
+            DynamicType.live_rcmd,
+            DynamicType.live,
+            DynamicType.ad,
+            DynamicType.banner,
+        ]:
+            logger.debug(f"无需推送的动态 {dynamic.card_type}，已跳过：{url}")
+            offset[uid] = dynamic_id
+            continue
 
-            type_msg = {
-                0: "发布了新动态",
-                DynamicType.forward: "转发了一条动态",
-                DynamicType.word: "发布了新文字动态",
-                DynamicType.draw: "发布了新图文动态",
-                DynamicType.av: "发布了新投稿",
-                DynamicType.article: "发布了新专栏",
-                DynamicType.music: "发布了新音频",
-            }
-            message = (
-                f"{name} {type_msg.get(dynamic.card_type, type_msg[0])}：\n"
-                + str(f"动态图片可能截图异常：{err}\n" if err else "")
-                + MessageSegment.image(image)
-                + f"\n{url}"
+        type_msg = {
+            0: "发布了新动态",
+            DynamicType.forward: "转发了一条动态",
+            DynamicType.word: "发布了新文字动态",
+            DynamicType.draw: "发布了新图文动态",
+            DynamicType.av: "发布了新投稿",
+            DynamicType.article: "发布了新专栏",
+            DynamicType.music: "发布了新音频",
+        }
+        message = (
+            f"{name} {type_msg.get(dynamic.card_type, type_msg[0])}：\n"
+            + str(f"动态图片可能截图异常：{err}\n" if err else "")
+            + MessageSegment.image(image)
+            + f"\n{url}"
+        )
+
+        push_list = await db.get_push_list(uid, "dynamic")
+        for sets in push_list:
+            await safe_send(
+                bot_id=sets.bot_id,
+                send_type=sets.type,
+                type_id=sets.type_id,
+                message=message,
+                at=bool(sets.at) and plugin_config.haruka_dynamic_at,
+                subscription_id=sets.id,
+                event_type="dynamic",
             )
 
-            push_list = await db.get_push_list(uid, "dynamic")
-            for sets in push_list:
-                await safe_send(
-                    bot_id=sets.bot_id,
-                    send_type=sets.type,
-                    type_id=sets.type_id,
-                    message=message,
-                    at=bool(sets.at) and plugin_config.haruka_dynamic_at,
-                    subscription_id=sets.id,
-                    event_type="dynamic",
-                )
+        offset[uid] = dynamic_id
 
-            offset[uid] = dynamic_id
-
-    if dynamic:
+    if selected_dynamics:
         await db.update_user(uid, name)
 
 

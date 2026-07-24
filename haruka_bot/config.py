@@ -24,6 +24,7 @@ class Config(BaseSettings):
     haruka_interval: int = 10
     haruka_live_interval: int = haruka_interval
     haruka_dynamic_enabled: bool = True
+    haruka_dynamic_max_push_per_poll: int = 1
     haruka_dynamic_interval: int = 0
     haruka_dynamic_at: bool = False
     haruka_screenshot_style: str = "mobile"
@@ -79,6 +80,12 @@ class Config(BaseSettings):
     def non_negative(cls, v: int, field: ModelField):
         """定时器为负返回默认值"""
         return field.default if v < 1 else v
+
+    @validator("haruka_dynamic_max_push_per_poll")
+    def valid_dynamic_max_push_per_poll(cls, v: int):
+        if v < 0:
+            raise ValueError("haruka_dynamic_max_push_per_poll must not be negative")
+        return v
 
     @validator("haruka_web_session_ttl")
     def valid_web_session_ttl(cls, v: int):

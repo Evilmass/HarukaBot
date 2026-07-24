@@ -133,6 +133,18 @@ HarukaBot。
 HARUKA_DYNAMIC_ENABLED=False
 ```
 
+## HARUKA_DYNAMIC_MAX_PUSH_PER_POLL
+
+默认值：1
+
+每轮爬取最多推送的动态数量。设置为 `1` 时只推送最新一条；设置为大于
+`1` 的值时，最多补发最近的对应数量；设置为 `0` 时保留旧版的全部补发
+行为。负数为无效配置。
+
+```yml
+HARUKA_DYNAMIC_MAX_PUSH_PER_POLL=1
+```
+
 ## HARUKA_DYNAMIC_INTERVAL
 
 默认值：0
