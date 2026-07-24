@@ -13,6 +13,7 @@ nonebot.load_plugin("nonebot_plugin_guild_patch")
 
 from haruka_bot.config import Config
 from haruka_bot.plugins.bili_video import (
+    BiliVideoDownloader,
     VideoInfo,
     extract_message_urls,
     parse_video_url,
@@ -139,6 +140,32 @@ class BiliVideoStreamTests(unittest.TestCase):
             info.canonical_url,
             "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
         )
+
+
+class BiliVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_media_download_uses_range_header(self):
+        async def handler(request):
+            self.assertEqual(request.headers["range"], "bytes=0-")
+            return httpx.Response(
+                206,
+                headers={
+                    "content-length": "5",
+                    "content-range": "bytes 0-4/5",
+                },
+                content=b"video",
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            downloader = BiliVideoDownloader(client)
+            with tempfile.TemporaryDirectory() as directory:
+                target = Path(directory, "video.m4s")
+                size = await downloader._download_stream(
+                    {"baseUrl": "https://cdn.example/video.m4s"},
+                    target,
+                )
+                self.assertEqual(size, 5)
+                self.assertEqual(target.read_bytes(), b"video")
 
 
 class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):

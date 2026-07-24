@@ -255,11 +255,14 @@ class BiliVideoDownloader:
     async def _download_stream(
         self, stream: Dict[str, Any], target: Path
     ) -> int:
-        last_error: Optional[Exception] = None
+        last_error = "未知错误"
         for url in _stream_urls(stream):
             size = 0
             try:
-                async with self.client.stream("GET", url) as response:
+                # B 站的媒体 CDN 会拒绝不带 Range 的普通 GET 请求。
+                async with self.client.stream(
+                    "GET", url, headers={"Range": "bytes=0-"}
+                ) as response:
                     response.raise_for_status()
                     content_length = int(response.headers.get("content-length", 0))
                     if content_length > self.max_bytes:
@@ -281,7 +284,13 @@ class BiliVideoDownloader:
                 target.unlink(missing_ok=True)
                 raise
             except (httpx.HTTPError, OSError, ValueError) as error:
-                last_error = error
+                if isinstance(error, httpx.HTTPStatusError):
+                    host = error.request.url.host
+                    last_error = (
+                        f"HTTP {error.response.status_code}（{host}）"
+                    )
+                else:
+                    last_error = type(error).__name__
                 target.unlink(missing_ok=True)
         raise BiliVideoError(f"下载 B 站媒体流失败：{last_error}")
 
