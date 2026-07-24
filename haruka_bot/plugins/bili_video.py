@@ -1,7 +1,9 @@
 import asyncio
 import json
 import re
-import tempfile
+import shutil
+import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -485,6 +487,32 @@ def _format_duration(seconds: int) -> str:
     return f"{minute:02d}:{second:02d}"
 
 
+async def _delayed_cleanup(directory: Path, delay: float = 60.0) -> None:
+    """延迟清理下载目录，给 NapCat/OneBot 足够时间复制视频文件。"""
+    await asyncio.sleep(delay)
+    try:
+        if directory.is_dir():
+            shutil.rmtree(directory, ignore_errors=True)
+            logger.debug(f"已清理下载目录：{directory}")
+    except Exception:
+        pass
+
+
+def _cleanup_stale_downloads(download_root: Path, min_age_seconds: int = 300) -> None:
+    """清理超过 min_age_seconds 秒的旧下载目录（上次异常退出残留）。"""
+    if not download_root.is_dir():
+        return
+    now = time.time()
+    for child in download_root.iterdir():
+        if child.is_dir() and child.name.startswith("download-"):
+            try:
+                if now - child.stat().st_mtime > min_age_seconds:
+                    shutil.rmtree(child, ignore_errors=True)
+                    logger.debug(f"已清理残留下载目录：{child}")
+            except OSError:
+                pass
+
+
 async def send_forward_video(
     bot: Bot,
     event: GroupMessageEvent,
@@ -559,16 +587,24 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
         download_root = Path(get_path("bili_video"))
         download_root.mkdir(parents=True, exist_ok=True)
 
+        # 清理上次异常退出可能残留的旧下载目录
+        _cleanup_stale_downloads(download_root)
+
         for reference in references:
             try:
                 async with download_semaphore:
-                    with tempfile.TemporaryDirectory(
-                        prefix="download-", dir=str(download_root)
-                    ) as temporary_dir:
+                    # 使用手动管理的目录替代 TemporaryDirectory，
+                    # 避免 NapCat 异步复制文件前目录就被删除。
+                    download_dir = download_root / f"download-{uuid.uuid4().hex[:12]}"
+                    download_dir.mkdir(parents=True, exist_ok=True)
+                    try:
                         info, video_path = await downloader.download(
-                            reference, Path(temporary_dir)
+                            reference, download_dir
                         )
                         await send_forward_video(bot, event, info, video_path)
+                    finally:
+                        # 延迟 60 秒后清理，给 NapCat 足够时间复制文件
+                        asyncio.create_task(_delayed_cleanup(download_dir))
             except BiliVideoError as error:
                 logger.warning(f"B 站视频 {reference.key} 下载失败：{error}")
                 await bot.send_group_msg(
