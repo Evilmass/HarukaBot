@@ -57,8 +57,8 @@ ws://127.0.0.1:7070/onebot/v11/ws
 配置允许使用该功能的 QQ 群后，机器人会捕捉群消息中的
 `bilibili.com/video/...`、`b23.tv/...`、`b23.wtf/...` 和
 `bili2233.cn/...` 视频链接，下载最高不超过配置清晰度的 DASH 视频、音频流，
-通过 FFmpeg 合并为 MP4，再以合并转发消息发送标题信息和视频。最高画质超过
-文件大小限制时会自动逐档降低清晰度。
+通过 FFmpeg 合并为 MP4，再发送标题信息和视频。最高画质超过文件大小限制时
+会自动逐档降低清晰度。
 
 ```dotenv
 # JSON 数组，或使用逗号/空格分隔的群号
@@ -68,7 +68,8 @@ HARUKA_BILI_VIDEO_COOKIE=
 # HarukaBot 对 NapCat 可访问的地址
 HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 HARUKA_BILI_VIDEO_QUALITY=80
-HARUKA_BILI_VIDEO_MAX_SIZE_MB=100
+# 单个视频的下载总上限；超过 95 MB 时自动上传为群文件
+HARUKA_BILI_VIDEO_MAX_SIZE_MB=512
 HARUKA_BILI_VIDEO_MAX_LINKS=3
 HARUKA_BILI_VIDEO_CONCURRENCY=2
 HARUKA_BILI_VIDEO_TIMEOUT=600
@@ -76,8 +77,10 @@ HARUKA_BILI_VIDEO_TIMEOUT=600
 
 宿主机运行时需安装 `ffmpeg` 并确保它在 `PATH` 中；Docker 镜像已内置。
 HarukaBot 会通过临时 HTTP 地址让 NapCat 下载合并后的视频，再使用 NapCat
-本地路径发送消息。`HARUKA_BILI_VIDEO_PUBLIC_BASE_URL` 必须填写 NapCat
-能够访问的 HarukaBot 地址；临时地址使用随机令牌并在下载完成后立即失效。
+本地路径发送消息。小于等于 95 MB 时发送普通群视频，超过 95 MB 时自动上传
+为群文件，避免合并转发中的视频在手机端无法查看。
+`HARUKA_BILI_VIDEO_PUBLIC_BASE_URL` 必须填写 NapCat 能够访问的 HarukaBot
+地址；临时地址使用随机令牌并在下载完成后立即失效。
 
 ## Web 直播订阅管理
 

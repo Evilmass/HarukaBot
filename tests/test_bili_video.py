@@ -26,7 +26,7 @@ from haruka_bot.plugins.bili_video import (
     get_dash_stream_candidates,
     parse_video_url,
     resolve_video_references,
-    send_forward_video,
+    send_video,
     select_dash_streams,
 )
 
@@ -347,7 +347,7 @@ class BiliVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
+class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         _temporary_video_files.clear()
 
@@ -369,11 +369,11 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
             duration=65,
         )
         TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        video_path = TEST_OUTPUT_DIR / "forward-placeholder.mp4"
+        video_path = TEST_OUTPUT_DIR / "send-placeholder.mp4"
         video_path.write_bytes(b"video-content")
         return bot, event, info, video_path
 
-    async def test_sends_napcat_local_video_in_forward_node(self):
+    async def test_sends_description_and_napcat_local_video_normally(self):
         bot, event, info, video_path = self._video_fixture()
         napcat_path = "/app/.config/QQ/NapCat/temp/video.mp4"
         bot.call_api.return_value = {"file": napcat_path}
@@ -382,7 +382,7 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
             "haruka_bili_video_public_base_url",
             "http://192.168.31.131:7070",
         ):
-            await send_forward_video(bot, event, info, video_path)
+            await send_video(bot, event, info, video_path)
 
         download_call = bot.call_api.await_args
         self.assertEqual(download_call.args, ("download_file",))
@@ -397,17 +397,49 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
             download_call.kwargs["_timeout"],
             Config().haruka_bili_video_timeout,
         )
-        call = bot.send_group_forward_msg.await_args
-        self.assertEqual(call.kwargs["group_id"], 123456)
+        self.assertEqual(bot.send_group_msg.await_count, 2)
+        description_call, video_call = bot.send_group_msg.await_args_list
+        self.assertEqual(description_call.kwargs["group_id"], 123456)
+        self.assertIn("title", str(description_call.kwargs["message"]))
+        self.assertEqual(video_call.kwargs["group_id"], 123456)
         self.assertEqual(
-            call.kwargs["_timeout"],
+            video_call.kwargs["_timeout"],
             Config().haruka_bili_video_timeout,
         )
-        messages = call.kwargs["messages"]
-        self.assertEqual(len(messages), 2)
-        video = messages[1]["data"]["content"][0]
+        video = video_call.kwargs["message"][0]
         self.assertEqual(video.type, "video")
         self.assertEqual(video.data["file"], napcat_path)
+        bot.send_group_forward_msg.assert_not_awaited()
+        self.assertFalse(_temporary_video_files)
+
+    async def test_large_video_is_uploaded_as_group_file(self):
+        bot, event, info, video_path = self._video_fixture()
+        napcat_path = "/app/.config/QQ/NapCat/temp/video.mp4"
+        bot.call_api.side_effect = [
+            {"file": napcat_path},
+            {"file_id": "group-file-id"},
+        ]
+        with (
+            patch.object(
+                plugin_config,
+                "haruka_bili_video_public_base_url",
+                "http://192.168.31.131:7070",
+            ),
+            patch(
+                "haruka_bot.plugins.bili_video.VIDEO_MESSAGE_SAFE_LIMIT_BYTES",
+                1,
+            ),
+        ):
+            await send_video(bot, event, info, video_path)
+
+        self.assertEqual(bot.call_api.await_count, 2)
+        upload_call = bot.call_api.await_args_list[1]
+        self.assertEqual(upload_call.args, ("upload_group_file",))
+        self.assertEqual(upload_call.kwargs["group_id"], 123456)
+        self.assertEqual(upload_call.kwargs["file"], napcat_path)
+        self.assertEqual(upload_call.kwargs["name"], "BV1xx411c7mD.mp4")
+        self.assertEqual(bot.send_group_msg.await_count, 1)
+        bot.send_group_forward_msg.assert_not_awaited()
         self.assertFalse(_temporary_video_files)
 
     async def test_missing_napcat_path_revokes_temporary_url(self):
@@ -419,8 +451,8 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
             "http://192.168.31.131:7070",
         ):
             with self.assertRaisesRegex(BiliVideoError, "没有返回本地文件路径"):
-                await send_forward_video(bot, event, info, video_path)
-        bot.send_group_forward_msg.assert_not_awaited()
+                await send_video(bot, event, info, video_path)
+        bot.send_group_msg.assert_not_awaited()
         self.assertFalse(_temporary_video_files)
 
     async def test_download_failure_revokes_temporary_url(self):
@@ -432,20 +464,41 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
             "http://192.168.31.131:7070",
         ):
             with self.assertRaisesRegex(RuntimeError, "download failed"):
-                await send_forward_video(bot, event, info, video_path)
+                await send_video(bot, event, info, video_path)
         self.assertFalse(_temporary_video_files)
 
-    async def test_forward_failure_leaves_no_temporary_url(self):
+    async def test_video_send_failure_leaves_no_temporary_url(self):
         bot, event, info, video_path = self._video_fixture()
         bot.call_api.return_value = {"file": "/tmp/video.mp4"}
-        bot.send_group_forward_msg.side_effect = RuntimeError("forward failed")
+        bot.send_group_msg.side_effect = [None, RuntimeError("video send failed")]
         with patch.object(
             plugin_config,
             "haruka_bili_video_public_base_url",
             "http://192.168.31.131:7070",
         ):
-            with self.assertRaisesRegex(RuntimeError, "forward failed"):
-                await send_forward_video(bot, event, info, video_path)
+            with self.assertRaisesRegex(RuntimeError, "video send failed"):
+                await send_video(bot, event, info, video_path)
+        self.assertFalse(_temporary_video_files)
+
+    async def test_group_file_failure_leaves_no_temporary_url(self):
+        bot, event, info, video_path = self._video_fixture()
+        bot.call_api.side_effect = [
+            {"file": "/tmp/video.mp4"},
+            RuntimeError("group file failed"),
+        ]
+        with (
+            patch.object(
+                plugin_config,
+                "haruka_bili_video_public_base_url",
+                "http://192.168.31.131:7070",
+            ),
+            patch(
+                "haruka_bot.plugins.bili_video.VIDEO_MESSAGE_SAFE_LIMIT_BYTES",
+                1,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "group file failed"):
+                await send_video(bot, event, info, video_path)
         self.assertFalse(_temporary_video_files)
 
 
