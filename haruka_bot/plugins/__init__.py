@@ -1,5 +1,6 @@
 from . import auto_agree  # noqa: F401
 from . import auto_delete  # noqa: F401
+from . import bili_video  # noqa: F401
 from . import help  # noqa: F401
 from . import live_duration  # noqa: F401
 from . import server_ip  # noqa: F401

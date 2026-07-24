@@ -1,3 +1,5 @@
+import json
+import re
 from typing import List, Optional
 
 from loguru import logger
@@ -32,9 +34,41 @@ class Config(BaseSettings):
     haruka_dynamic_font: Optional[str] = "Noto Sans CJK SC"
     haruka_dynamic_big_image: bool = False
     haruka_command_prefix: str = ""
+    haruka_bili_video_groups: List[int] = []
+    haruka_bili_video_cookie: Optional[str] = None
+    haruka_bili_video_quality: int = 80
+    haruka_bili_video_max_size_mb: int = 100
+    haruka_bili_video_max_links: int = 3
+    haruka_bili_video_concurrency: int = 2
+    haruka_bili_video_ffmpeg: str = "ffmpeg"
+    haruka_bili_video_timeout: int = 600
     # 频道管理员身份组
     haruka_guild_admin_roles: List[str] = ["频道主", "超级管理员"]
     ignore_group: Optional[List[int]]
+
+    @validator("haruka_bili_video_groups", pre=True)
+    def parse_bili_video_groups(cls, v):
+        """群号既支持 JSON 数组，也支持逗号或空格分隔。"""
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            value = v.strip()
+            if value.startswith("["):
+                value = json.loads(value)
+            else:
+                value = [item for item in re.split(r"[\s,;]+", value) if item]
+            v = value
+        return [int(group_id) for group_id in v]
+
+    @validator(
+        "haruka_bili_video_quality",
+        "haruka_bili_video_max_size_mb",
+        "haruka_bili_video_max_links",
+        "haruka_bili_video_concurrency",
+        "haruka_bili_video_timeout",
+    )
+    def positive_bili_video_setting(cls, v: int):
+        return max(v, 1)
 
     @validator("haruka_interval", "haruka_live_interval", "haruka_dynamic_interval")
     def non_negative(cls, v: int, field: ModelField):
@@ -68,6 +102,12 @@ class Config(BaseSettings):
 
     class Config:
         extra = "ignore"
+
+        @classmethod
+        def parse_env_var(cls, field_name: str, raw_value: str):
+            if field_name == "haruka_bili_video_groups":
+                return raw_value
+            return json.loads(raw_value)
 
 
 global_config = get_driver().config

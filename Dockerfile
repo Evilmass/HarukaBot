@@ -15,7 +15,7 @@ WORKDIR /app
 
 # bilireq is installed from a pinned Git commit, so git is a build dependency.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends git \
+    && apt-get install --yes --no-install-recommends ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
 # Keep dependency installation cacheable when application code changes.
