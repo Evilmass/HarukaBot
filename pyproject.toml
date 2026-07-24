@@ -20,7 +20,6 @@ dependencies = [
     #"bilireq @ git+https://github.com/Evilmass/bilireq",
     "packaging>=23.1",
     "nonebot-plugin-guild-patch>=0.2.3",
-    "nonebot-plugin-sticker-saver>=0.1.4,<0.2.0",
     "msvc-runtime>=14.34.31931; sys_platform == \"win32\"",
     "aunly-captcha-solver>=0.1",
 ]
@@ -44,7 +43,7 @@ dev = [
 adapters = [
     { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }
 ]
-plugins = ["haruka_bot", "nonebot_plugin_guild_patch", "nonebot_plugin_sticker_saver"]
+plugins = ["haruka_bot", "nonebot_plugin_guild_patch"]
 plugin_dirs = []
 builtin_plugins = []
 
