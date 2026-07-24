@@ -43,14 +43,11 @@ class Config(BaseSettings):
     # 未配置时回退使用 haruka_bili_video_cookie
     haruka_bili_auth_cookie: Optional[str] = None
     haruka_bili_video_quality: int = 80
-    haruka_bili_video_max_size_mb: int = 100
+    haruka_bili_video_max_size_mb: int = 90
     haruka_bili_video_max_links: int = 3
     haruka_bili_video_concurrency: int = 2
     haruka_bili_video_ffmpeg: str = "ffmpeg"
     haruka_bili_video_timeout: int = 600
-    haruka_bili_video_compress_enabled: bool = True
-    haruka_bili_video_compress_min_bitrate_kbps: int = 500
-    haruka_bili_video_compress_preset: str = "veryfast"
     # 频道管理员身份组
     haruka_guild_admin_roles: List[str] = ["频道主", "超级管理员"]
     ignore_group: Optional[List[int]]
@@ -75,7 +72,6 @@ class Config(BaseSettings):
         "haruka_bili_video_max_links",
         "haruka_bili_video_concurrency",
         "haruka_bili_video_timeout",
-        "haruka_bili_video_compress_min_bitrate_kbps",
     )
     def positive_bili_video_setting(cls, v: int):
         return max(v, 1)

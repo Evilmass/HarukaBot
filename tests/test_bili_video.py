@@ -316,6 +316,95 @@ class BiliVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(video, video_low)
         self.assertIs(selected_audio, audio)
 
+    async def test_all_qualities_exceed_max_but_fit_compress(self):
+        """所有清晰度超 max_bytes 但在 compress_max_bytes 内时触发压缩兜底。"""
+        video_high = {"id": 80, "baseUrl": "high", "codecs": "avc1"}
+        video_low = {"id": 64, "baseUrl": "low", "codecs": "avc1"}
+        audio = {"id": 30280, "baseUrl": "audio"}
+        client = AsyncMock(spec=httpx.AsyncClient)
+        downloader = BiliVideoDownloader(client)
+        max_bytes = downloader.max_bytes
+        compress_max = 200 * 1024 * 1024  # 200 MB
+        sizes = {
+            "audio": 20 * 1024 * 1024,
+            "high": max_bytes,  # 刚好等于 max，加上 audio 就超了
+            "low": max_bytes - 5 * 1024 * 1024,  # 略低于 max，但加上 audio 也超
+        }
+        downloader._probe_stream_size = AsyncMock(
+            side_effect=lambda stream, referer: sizes[stream["baseUrl"]]
+        )
+
+        video, selected_audio = await downloader._select_fitting_dash_streams(
+            {
+                "dash": {
+                    "video": [video_high, video_low],
+                    "audio": [audio],
+                }
+            },
+            "https://www.bilibili.com/video/BV1xx411c7mD",
+            compress_max_bytes=compress_max,
+        )
+
+        self.assertIs(video, video_low)
+        self.assertIs(selected_audio, audio)
+
+    async def test_all_qualities_exceed_both_limits_raises(self):
+        """所有清晰度同时超过 max_bytes 和 compress_max_bytes 时抛出异常。"""
+        video_high = {"id": 80, "baseUrl": "high", "codecs": "avc1"}
+        video_low = {"id": 64, "baseUrl": "low", "codecs": "avc1"}
+        audio = {"id": 30280, "baseUrl": "audio"}
+        client = AsyncMock(spec=httpx.AsyncClient)
+        downloader = BiliVideoDownloader(client)
+        sizes = {
+            "audio": 200 * 1024 * 1024,
+            "high": 200 * 1024 * 1024,
+            "low": 200 * 1024 * 1024,
+        }
+        downloader._probe_stream_size = AsyncMock(
+            side_effect=lambda stream, referer: sizes[stream["baseUrl"]]
+        )
+
+        with self.assertRaises(BiliVideoError):
+            await downloader._select_fitting_dash_streams(
+                {
+                    "dash": {
+                        "video": [video_high, video_low],
+                        "audio": [audio],
+                    }
+                },
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                compress_max_bytes=150 * 1024 * 1024,
+            )
+
+    async def test_compress_disabled_when_all_exceed_max_raises(self):
+        """压缩未启用（compress_max_bytes=None）时，所有清晰度超限应立即报错。"""
+        video_high = {"id": 80, "baseUrl": "high", "codecs": "avc1"}
+        video_low = {"id": 64, "baseUrl": "low", "codecs": "avc1"}
+        audio = {"id": 30280, "baseUrl": "audio"}
+        client = AsyncMock(spec=httpx.AsyncClient)
+        downloader = BiliVideoDownloader(client)
+        max_bytes = downloader.max_bytes
+        sizes = {
+            "audio": 20 * 1024 * 1024,
+            "high": max_bytes,
+            "low": max_bytes - 5 * 1024 * 1024,
+        }
+        downloader._probe_stream_size = AsyncMock(
+            side_effect=lambda stream, referer: sizes[stream["baseUrl"]]
+        )
+
+        with self.assertRaises(BiliVideoError):
+            await downloader._select_fitting_dash_streams(
+                {
+                    "dash": {
+                        "video": [video_high, video_low],
+                        "audio": [audio],
+                    }
+                },
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                compress_max_bytes=None,
+            )
+
     @unittest.skipUnless(
         os.getenv("HARUKA_TEST_BILI_VIDEO_URL"),
         "pass -u VIDEO_URL to run the real download test",

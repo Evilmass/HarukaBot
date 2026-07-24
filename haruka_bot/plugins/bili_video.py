@@ -702,8 +702,7 @@ class BiliVideoDownloader:
                 raise
             if sum(sizes) > self.max_bytes:
                 raise BiliVideoError(
-                    "视频文件超过 "
-                    f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
+                    f"视频文件超过 {self.max_bytes // 1024 // 1024} MB 限制"
                 )
             await self._run_ffmpeg([video_path, audio_path], output, log_id)
         else:
@@ -720,8 +719,7 @@ class BiliVideoDownloader:
             raise BiliVideoError("视频合并完成后没有生成有效文件")
         if output.stat().st_size > self.max_bytes:
             raise BiliVideoError(
-                "合并后的视频超过 "
-                f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
+                f"合并后的视频超过 {self.max_bytes // 1024 // 1024} MB 限制"
             )
         logger.info(
             f"[B站视频][{log_id}] 下载与合并全部完成："
@@ -777,128 +775,16 @@ def _cleanup_stale_downloads(download_root: Path, min_age_seconds: int = 300) ->
                 pass
 
 
-async def compress_video(
-    input_path: Path,
-    duration_seconds: int,
-    log_id: str,
-    target_bytes: int,
-    min_bitrate_bps: int,
-) -> Path:
-    """使用 FFmpeg 重新编码视频，使其大小不超过目标值。
-
-    根据视频时长计算目标码率，单次编码输出。
-    若压缩后仍超过限制，会以更低的码率重试一次。
-    """
-    duration = max(duration_seconds, 1)
-    audio_bitrate_bps = 128_000
-    # 留 1% 安全余量
-    target_bits = int(target_bytes * 8 * 0.99)
-    audio_bits = audio_bitrate_bps * duration
-    video_bitrate_bps = max(
-        (target_bits - audio_bits) // duration,
-        min_bitrate_bps,
-    )
-
-    output_path = input_path.parent / "compressed.mp4"
-    ffmpeg = plugin_config.haruka_bili_video_ffmpeg
-
-    async def _run_compress(vb: int) -> bool:
-        """执行单次 FFmpeg 压缩，返回是否在目标大小内。"""
-        preset = plugin_config.haruka_bili_video_compress_preset
-        command = [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(input_path),
-            "-c:v",
-            "libx264",
-            "-preset",
-            preset,
-            "-b:v",
-            str(vb),
-            "-maxrate",
-            str(int(vb * 1.5)),
-            "-bufsize",
-            str(int(vb * 2)),
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-movflags",
-            "+faststart",
-            str(output_path),
-        ]
-        compress_started = time.perf_counter()
-        logger.info(
-            f"[B站视频][{log_id}] 开始压缩视频："
-            f"原始 {_format_size(input_path.stat().st_size)}，"
-            f"目标 ≤{target_bytes / 1024 / 1024:.0f} MB，"
-            f"视频码率 {vb / 1000:.0f} kbps，"
-            f"preset={preset}"
-        )
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError as error:
-            raise BiliVideoError("未找到 FFmpeg，请安装后重启机器人") from error
-
-        try:
-            _, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=plugin_config.haruka_bili_video_timeout,
-            )
-        except asyncio.TimeoutError as error:
-            process.kill()
-            await process.communicate()
-            raise BiliVideoError("FFmpeg 压缩视频超时") from error
-
-        if process.returncode != 0:
-            detail = stderr.decode("utf-8", errors="replace")[-500:]
-            logger.error(f"FFmpeg 压缩 B 站视频失败：{detail}")
-            raise BiliVideoError("FFmpeg 无法压缩该视频")
-
-        output_size = output_path.stat().st_size if output_path.is_file() else 0
-        elapsed = time.perf_counter() - compress_started
-        logger.info(
-            f"[B站视频][{log_id}] 压缩完成："
-            f"{_format_size(output_size)}，耗时 {elapsed:.2f} 秒"
-        )
-        return output_size > 0 and output_size <= target_bytes
-
-    # 第一次尝试
-    if await _run_compress(video_bitrate_bps):
-        return output_path
-
-    # 重试：码率降至当前的 70%，但不低于最低码率
-    retry_bitrate = max(int(video_bitrate_bps * 0.7), min_bitrate_bps)
-    if retry_bitrate < video_bitrate_bps:
-        logger.warning(
-            f"[B站视频][{log_id}] 压缩后仍超限，"
-            f"降低码率重试：{retry_bitrate / 1000:.0f} kbps"
-        )
-        try:
-            if await _run_compress(retry_bitrate):
-                return output_path
-        except BiliVideoError:
-            pass  # 重试失败，抛出最终错误
-
-    raise BiliVideoError(f"视频压缩后仍超过 {target_bytes / 1024 / 1024:.0f} MB 限制")
-
-
 async def send_video(
     bot: Bot,
     event: GroupMessageEvent,
     info: VideoInfo,
     video_path: Path,
-    compress_label: str = "",
 ) -> None:
     """通过合并转发消息发送视频（视频节点 + 描述节点）。"""
     part = f"\n分P：P{info.page_number} {info.page_name}" if info.page_count > 1 else ""
     description = (
-        f"{compress_label}{info.title}\nUP：{info.owner}{part}\n"
+        f"{info.title}\nUP：{info.owner}{part}\n"
         f"时长：{_format_duration(info.duration)}\n{info.canonical_url}"
     )
     size = video_path.stat().st_size
@@ -1042,44 +928,21 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
                         download_dir = video_dir
                         video_path = video_dir / "video.mp4"
 
-                        # 视频超过大小限制时尝试压缩
+                        # 视频大小检查
                         max_bytes = (
                             plugin_config.haruka_bili_video_max_size_mb * 1024 * 1024
                         )
-                        compress_label = ""
-                        if (
-                            plugin_config.haruka_bili_video_compress_enabled
-                            and video_path.stat().st_size > max_bytes
-                        ):
-                            min_bitrate = (
-                                plugin_config.haruka_bili_video_compress_min_bitrate_kbps
-                                * 1000
-                            )
-                            compressed_path = await compress_video(
-                                video_path,
-                                info.duration,
-                                bvid,
-                                max_bytes,
-                                min_bitrate,
-                            )
-                            video_path = compressed_path
-                            compress_label = "（已压缩）"
-
-                        # 最终大小检查
                         if video_path.stat().st_size > max_bytes:
                             raise BiliVideoError(
-                                f"视频压缩后仍超过 "
+                                f"视频超过 "
                                 f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
                             )
 
-                        await send_video(bot, event, info, video_path, compress_label)
+                        await send_video(bot, event, info, video_path)
 
                         # 清理临时流文件（保留最终视频供 HTTP serving）
                         for tmp in video_dir.glob("*.m4s"):
                             tmp.unlink(missing_ok=True)
-                        for tmp in video_dir.glob("compressed.mp4"):
-                            if tmp != video_path:
-                                tmp.unlink(missing_ok=True)
 
                         # 延迟清理整个目录（给 OneBot 客户端足够时间下载）
                         asyncio.create_task(_delayed_cleanup(video_dir))
