@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import tempfile
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -169,10 +170,10 @@ def _stream_urls(stream: Dict[str, Any]) -> Iterable[str]:
             yield str(url)
 
 
-def select_dash_streams(
+def get_dash_stream_candidates(
     play_data: Dict[str, Any], max_quality: int
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """选择不超过配置清晰度的最高画质，编码相同时优先 AVC。"""
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """按清晰度降序返回视频流，每档编码优先 AVC。"""
     dash = play_data.get("dash") or {}
     videos = list(dash.get("video") or [])
     audios = list(dash.get("audio") or [])
@@ -182,19 +183,31 @@ def select_dash_streams(
     allowed = [item for item in videos if int(item.get("id", 0)) <= max_quality]
     if not allowed:
         allowed = videos
-    quality = max(int(item.get("id", 0)) for item in allowed)
-    same_quality = [
-        item for item in allowed if int(item.get("id", 0)) == quality
-    ]
 
     def video_rank(item: Dict[str, Any]) -> Tuple[int, int]:
         codec = str(item.get("codecs", "")).lower()
         avc_compatible = int(codec.startswith("avc") or codec.startswith("h264"))
         return avc_compatible, int(item.get("bandwidth", 0))
 
-    video = max(same_quality, key=video_rank)
+    candidates = []
+    qualities = sorted(
+        {int(item.get("id", 0)) for item in allowed}, reverse=True
+    )
+    for quality in qualities:
+        same_quality = [
+            item for item in allowed if int(item.get("id", 0)) == quality
+        ]
+        candidates.append(max(same_quality, key=video_rank))
     audio = max(audios, key=lambda item: int(item.get("bandwidth", 0)))
-    return video, audio
+    return candidates, audio
+
+
+def select_dash_streams(
+    play_data: Dict[str, Any], max_quality: int
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """选择不超过配置清晰度的最高画质，编码相同时优先 AVC。"""
+    videos, audio = get_dash_stream_candidates(play_data, max_quality)
+    return videos[0], audio
 
 
 class BiliVideoDownloader:
@@ -253,15 +266,15 @@ class BiliVideoDownloader:
         )
 
     async def _download_stream(
-        self, stream: Dict[str, Any], target: Path
+        self, stream: Dict[str, Any], target: Path, referer: str
     ) -> int:
         last_error = "未知错误"
         for url in _stream_urls(stream):
             size = 0
             try:
                 # B 站的媒体 CDN 会拒绝不带 Range 的普通 GET 请求。
-                async with self.client.stream(
-                    "GET", url, headers={"Range": "bytes=0-"}
+                async with self._media_stream(
+                    url, "bytes=0-", referer
                 ) as response:
                     response.raise_for_status()
                     content_length = int(response.headers.get("content-length", 0))
@@ -293,6 +306,73 @@ class BiliVideoDownloader:
                     last_error = type(error).__name__
                 target.unlink(missing_ok=True)
         raise BiliVideoError(f"下载 B 站媒体流失败：{last_error}")
+
+    @asynccontextmanager
+    async def _media_stream(
+        self, url: str, byte_range: str, referer: str
+    ):
+        """使用视频页 Referer 访问 CDN，且不向 CDN 发送登录 Cookie。"""
+        request = self.client.build_request(
+            "GET",
+            url,
+            headers={
+                "Range": byte_range,
+                "User-Agent": DEFAULT_USER_AGENT,
+                "Referer": referer,
+                "Accept-Encoding": "identity",
+            },
+        )
+        request.headers.pop("cookie", None)
+        response = await self.client.send(request, stream=True)
+        try:
+            yield response
+        finally:
+            await response.aclose()
+
+    async def _probe_stream_size(
+        self, stream: Dict[str, Any], referer: str
+    ) -> Optional[int]:
+        """通过单字节 Range 请求获取媒体流的完整大小。"""
+        for url in _stream_urls(stream):
+            try:
+                async with self._media_stream(
+                    url, "bytes=0-0", referer
+                ) as response:
+                    response.raise_for_status()
+                    content_range = response.headers.get("content-range", "")
+                    if "/" in content_range:
+                        total = content_range.rsplit("/", 1)[-1]
+                        if total.isdigit():
+                            return int(total)
+                    if response.status_code == 200:
+                        content_length = response.headers.get("content-length")
+                        if content_length and content_length.isdigit():
+                            return int(content_length)
+            except (httpx.HTTPError, OSError, ValueError):
+                continue
+        return None
+
+    async def _select_fitting_dash_streams(
+        self, play_data: Dict[str, Any], referer: str
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        videos, audio = get_dash_stream_candidates(
+            play_data, plugin_config.haruka_bili_video_quality
+        )
+        audio_size = await self._probe_stream_size(audio, referer)
+        for index, video in enumerate(videos):
+            video_size = await self._probe_stream_size(video, referer)
+            known_size = (audio_size or 0) + (video_size or 0)
+            if known_size <= self.max_bytes:
+                if index:
+                    logger.info(
+                        "B 站视频最高画质超过大小限制，"
+                        f"自动降级到清晰度 ID {video.get('id')}"
+                    )
+                return video, audio
+        raise BiliVideoError(
+            "最低清晰度仍超过 "
+            f"{plugin_config.haruka_bili_video_max_size_mb} MB 限制"
+        )
 
     async def _run_ffmpeg(self, inputs: Sequence[Path], output: Path) -> None:
         command: List[str] = [plugin_config.haruka_bili_video_ffmpeg, "-y"]
@@ -334,17 +414,23 @@ class BiliVideoDownloader:
         output = directory / "video.mp4"
 
         if play_data.get("dash"):
-            video_stream, audio_stream = select_dash_streams(
-                play_data, plugin_config.haruka_bili_video_quality
+            video_stream, audio_stream = (
+                await self._select_fitting_dash_streams(
+                    play_data, info.canonical_url
+                )
             )
             video_path = directory / "video.m4s"
             audio_path = directory / "audio.m4s"
             tasks = [
                 asyncio.create_task(
-                    self._download_stream(video_stream, video_path)
+                    self._download_stream(
+                        video_stream, video_path, info.canonical_url
+                    )
                 ),
                 asyncio.create_task(
-                    self._download_stream(audio_stream, audio_path)
+                    self._download_stream(
+                        audio_stream, audio_path, info.canonical_url
+                    )
                 ),
             ]
             try:
@@ -365,7 +451,7 @@ class BiliVideoDownloader:
             if not durl:
                 raise BiliVideoError("B 站没有返回可下载的视频流")
             source = directory / "video_source"
-            await self._download_stream(durl[0], source)
+            await self._download_stream(durl[0], source, info.canonical_url)
             await self._run_ffmpeg([source], output)
 
         if not output.is_file() or output.stat().st_size == 0:
@@ -420,7 +506,7 @@ async def send_forward_video(
 
 def _http_client_options() -> Dict[str, Any]:
     headers = {
-        "User-Agent": plugin_config.haruka_browser_ua or DEFAULT_USER_AGENT,
+        "User-Agent": DEFAULT_USER_AGENT,
         "Referer": "https://www.bilibili.com/",
         "Accept-Encoding": "identity",
     }
