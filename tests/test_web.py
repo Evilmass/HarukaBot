@@ -19,10 +19,13 @@ from haruka_bot.web.app import (
     LOGIN_MAX_TRACKED_IPS,
     ROOM_RESOLVE_TIMEOUT_SECONDS,
     RoomResolveError,
+    _avatar_cache,
     _bot_cache,
     _create_session,
     _extract_room_id,
+    _get_avatar_data,
     _login_failures,
+    _normalize_avatar_url,
     _prune_login_failures,
     _read_session,
     _resolve_room,
@@ -191,6 +194,19 @@ class WebSecurityTests(unittest.TestCase):
             )
             self.assertEqual(listing.status_code, 200)
             self.assertEqual(listing.json()["total"], 1)
+            self.assertEqual(
+                listing.json()["items"][0]["avatar_url"],
+                "/admin/api/users/1001/avatar",
+            )
+
+            with patch(
+                "haruka_bot.web.app._get_avatar_data",
+                new=AsyncMock(return_value=(b"\x89PNG\r\n", "image/png")),
+            ):
+                avatar = client.get("/admin/api/users/1001/avatar")
+            self.assertEqual(avatar.status_code, 200)
+            self.assertEqual(avatar.headers["content-type"], "image/png")
+            self.assertIn("max-age=3600", avatar.headers["cache-control"])
 
             options = client.get("/admin/api/options")
             self.assertEqual(options.status_code, 200)
@@ -291,6 +307,30 @@ class WebSecurityTests(unittest.TestCase):
 
 
 class RoomResolverTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        _avatar_cache.clear()
+
+    def test_avatar_url_validation(self):
+        self.assertEqual(
+            _normalize_avatar_url("//i0.hdslb.com/bfs/face/avatar.jpg"),
+            "https://i0.hdslb.com/bfs/face/avatar.jpg",
+        )
+        self.assertEqual(
+            _normalize_avatar_url("http://i1.hdslb.com/bfs/face/avatar.jpg"),
+            "https://i1.hdslb.com/bfs/face/avatar.jpg",
+        )
+        self.assertEqual(_normalize_avatar_url("https://example.com/avatar.jpg"), "")
+
+    async def test_avatar_data_is_cached(self):
+        avatar = (b"image-data", "image/jpeg")
+        with patch(
+            "haruka_bot.web.app._load_avatar",
+            new=AsyncMock(return_value=avatar),
+        ) as load_avatar:
+            self.assertEqual(await _get_avatar_data(1001), avatar)
+            self.assertEqual(await _get_avatar_data(1001), avatar)
+        load_avatar.assert_awaited_once_with(1001)
+
     async def test_resolve_room_success(self):
         with patch(
             "haruka_bot.web.app.get",

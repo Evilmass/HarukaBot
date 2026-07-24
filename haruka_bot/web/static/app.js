@@ -138,6 +138,14 @@ function targetLabel(item) {
   return item.target_name || item.target_id;
 }
 
+function avatarContents(item) {
+  const fallback = escapeHtml((item.name || "H").slice(0, 1));
+  const image = item.avatar_url
+    ? `<img class="avatar-image" src="${escapeHtml(item.avatar_url)}" alt="" loading="lazy" decoding="async">`
+    : "";
+  return `<span class="avatar-fallback">${fallback}</span>${image}`;
+}
+
 function renderTable(items) {
   $("#subscription-table").innerHTML = items
     .map(
@@ -145,7 +153,7 @@ function renderTable(items) {
       <tr>
         <td>
           <div class="streamer-cell">
-            <span class="avatar">${escapeHtml((item.name || "H").slice(0, 1))}</span>
+            <span class="avatar">${avatarContents(item)}</span>
             <div>
               <strong>${escapeHtml(item.name || `UID ${item.uid}`)}</strong>
               <span>UID ${escapeHtml(item.uid)} · 房间 ${escapeHtml(item.room_id || "未知")}</span>
@@ -192,7 +200,7 @@ function renderMobile(items) {
       <article class="mobile-card">
         <div class="mobile-card-header">
           <div class="streamer-cell">
-            <span class="avatar">${escapeHtml((item.name || "H").slice(0, 1))}</span>
+            <span class="avatar">${avatarContents(item)}</span>
             <div>
               <strong>${escapeHtml(item.name || `UID ${item.uid}`)}</strong>
               <span>UID ${escapeHtml(item.uid)} · 房间 ${escapeHtml(item.room_id || "未知")}</span>
@@ -355,7 +363,7 @@ function openEditModal(item) {
   $("#room-field").classList.add("hidden");
   $("#room-input").required = false;
   $("#editing-streamer").classList.remove("hidden");
-  $("#editing-avatar").textContent = (item.name || "H").slice(0, 1);
+  $("#editing-avatar").innerHTML = avatarContents(item);
   $("#editing-name").textContent = item.name || `UID ${item.uid}`;
   $("#editing-meta").textContent = `UID ${item.uid} · 直播间 ${item.room_id || "未知"}`;
   $("#bot-input").value = item.bot_id;
@@ -511,6 +519,24 @@ $("#subscription-form").addEventListener("submit", saveSubscription);
 $("#bot-input").addEventListener("input", renderGroupOptions);
 $("#subscription-table").addEventListener("click", handleRowAction);
 $("#mobile-list").addEventListener("click", handleRowAction);
+document.addEventListener(
+  "load",
+  (event) => {
+    if (event.target.matches?.(".avatar-image")) {
+      event.target.classList.add("loaded");
+    }
+  },
+  true,
+);
+document.addEventListener(
+  "error",
+  (event) => {
+    if (event.target.matches?.(".avatar-image")) {
+      event.target.remove();
+    }
+  },
+  true,
+);
 $("#refresh-button").addEventListener("click", async () => {
   await refreshData("数据已刷新");
 });

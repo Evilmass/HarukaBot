@@ -10,8 +10,10 @@ import secrets
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
+import httpx
 import nonebot
 from bilireq.exceptions import ResponseCodeError
 from bilireq.user import get_user_info
@@ -37,6 +39,17 @@ LOGIN_MAX_FAILURES = 5
 LOGIN_MAX_TRACKED_IPS = 2048
 BOT_CACHE_SECONDS = 30
 ROOM_RESOLVE_TIMEOUT_SECONDS = 10
+AVATAR_CACHE_SECONDS = 6 * 60 * 60
+AVATAR_ERROR_CACHE_SECONDS = 5 * 60
+AVATAR_BROWSER_CACHE_SECONDS = 60 * 60
+AVATAR_MAX_BYTES = 5 * 1024 * 1024
+AVATAR_ALLOWED_HOSTS = ("hdslb.com", "biliimg.com")
+AVATAR_ALLOWED_MEDIA_TYPES = (
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+)
 WEB_CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
     "base-uri 'self'; "
@@ -54,6 +67,8 @@ router = APIRouter(prefix="/admin", tags=["HarukaBot Web"])
 _login_failures: Dict[str, List[float]] = {}
 _bot_cache: Dict[str, Any] = {"expires": 0.0, "value": None}
 _bot_cache_lock = asyncio.Lock()
+_avatar_cache: Dict[int, Dict[str, Any]] = {}
+_avatar_tasks: Dict[int, "asyncio.Task[Optional[Tuple[bytes, str]]]"] = {}
 
 
 class LoginRequest(BaseModel):
@@ -105,6 +120,7 @@ class SubscriptionView(BaseModel):
     id: int
     uid: int
     name: str
+    avatar_url: str
     room_id: int
     target_type: str
     target_id: int
@@ -332,6 +348,104 @@ async def _get_bot_snapshot(force: bool = False) -> Dict[str, Any]:
         return value
 
 
+def _avatar_proxy_url(uid: int) -> str:
+    return f"/admin/api/users/{uid}/avatar"
+
+
+def _normalize_avatar_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    elif url.startswith("http://"):
+        url = "https://" + url[len("http://") :]
+
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").lower()
+    allowed_host = any(
+        hostname == suffix or hostname.endswith("." + suffix)
+        for suffix in AVATAR_ALLOWED_HOSTS
+    )
+    if parsed.scheme != "https" or not allowed_host:
+        return ""
+    return url
+
+
+async def _download_avatar(url: str) -> Tuple[bytes, str]:
+    client_options: Dict[str, Any] = {
+        "follow_redirects": False,
+        "timeout": 8.0,
+    }
+    if plugin_config.haruka_proxy:
+        client_options["proxies"] = PROXIES
+
+    headers = {
+        "Accept": "image/webp,image/png,image/jpeg,image/gif",
+        "Referer": "https://www.bilibili.com/",
+        "User-Agent": "Mozilla/5.0 HarukaBot-WebUI",
+    }
+    async with httpx.AsyncClient(**client_options) as client:
+        async with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+            media_type = (
+                response.headers.get("content-type", "").split(";", 1)[0].lower()
+            )
+            if media_type not in AVATAR_ALLOWED_MEDIA_TYPES:
+                actual_type = media_type or "missing"
+                raise ValueError(f"unexpected avatar content type: {actual_type}")
+
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > AVATAR_MAX_BYTES:
+                raise ValueError("avatar is too large")
+
+            chunks = []
+            size = 0
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > AVATAR_MAX_BYTES:
+                    raise ValueError("avatar is too large")
+                chunks.append(chunk)
+    return b"".join(chunks), media_type
+
+
+async def _load_avatar(uid: int) -> Optional[Tuple[bytes, str]]:
+    try:
+        user_info = await get_user_info(uid, reqtype="web", proxies=PROXIES)
+        avatar_url = _normalize_avatar_url((user_info.get("card") or {}).get("face"))
+        if not avatar_url:
+            return None
+        return await _download_avatar(avatar_url)
+    except Exception as e:
+        logger.warning(f"WebUI 获取用户 {uid} 头像失败：{e}")
+        return None
+
+
+async def _get_avatar_data(uid: int) -> Optional[Tuple[bytes, str]]:
+    now = time.monotonic()
+    cached = _avatar_cache.get(uid)
+    if cached and cached["expires"] > now:
+        return cached["value"]
+
+    task = _avatar_tasks.get(uid)
+    if task is None:
+        task = asyncio.create_task(_load_avatar(uid))
+        _avatar_tasks[uid] = task
+    try:
+        value = await task
+    finally:
+        if _avatar_tasks.get(uid) is task:
+            _avatar_tasks.pop(uid, None)
+
+    ttl = AVATAR_CACHE_SECONDS if value is not None else AVATAR_ERROR_CACHE_SECONDS
+    _avatar_cache[uid] = {"expires": time.monotonic() + ttl, "value": value}
+    if len(_avatar_cache) > 512:
+        oldest_uid = min(
+            (item for item in _avatar_cache if item != uid),
+            key=lambda item: _avatar_cache[item]["expires"],
+        )
+        _avatar_cache.pop(oldest_uid, None)
+    return value
+
+
 async def _subscription_rows(force_options: bool = False) -> List[Dict[str, Any]]:
     subs = sorted(
         await db.get_subs(),
@@ -373,6 +487,7 @@ async def _subscription_rows(force_options: bool = False) -> List[Dict[str, Any]
                 "id": sub.id,
                 "uid": sub.uid,
                 "name": user.name if user else "",
+                "avatar_url": _avatar_proxy_url(sub.uid),
                 "room_id": user.room_id if user else 0,
                 "target_type": sub.type,
                 "target_id": sub.type_id,
@@ -544,6 +659,26 @@ async def list_subscriptions(
     if live_enabled is not None:
         rows = [row for row in rows if row["live"] is live_enabled]
     return {"items": rows, "total": len(rows)}
+
+
+@router.get("/api/users/{uid}/avatar")
+async def user_avatar(
+    uid: int,
+    _session: Dict[str, Any] = Depends(require_auth),
+):
+    if uid <= 0:
+        raise HTTPException(status_code=404, detail="头像不可用")
+    avatar = await _get_avatar_data(uid)
+    if avatar is None:
+        raise HTTPException(status_code=404, detail="头像暂时不可用")
+    content, media_type = avatar
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Cache-Control": f"private, max-age={AVATAR_BROWSER_CACHE_SECONDS}",
+        },
+    )
 
 
 @router.get("/api/options", response_model=OptionsResponse)
@@ -726,9 +861,18 @@ def setup_web():
             response.headers["Permissions-Policy"] = (
                 "camera=(), geolocation=(), microphone=()"
             )
-            response.headers["Cache-Control"] = (
-                "no-store" if path.startswith("/admin/api/") else "no-cache"
-            )
+            if (
+                path.startswith("/admin/api/users/")
+                and path.endswith("/avatar")
+                and response.status_code == 200
+            ):
+                response.headers["Cache-Control"] = (
+                    f"private, max-age={AVATAR_BROWSER_CACHE_SECONDS}"
+                )
+            else:
+                response.headers["Cache-Control"] = (
+                    "no-store" if path.startswith("/admin/api/") else "no-cache"
+                )
         return response
 
     app.include_router(router)
