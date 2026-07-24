@@ -391,8 +391,8 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
                 "http://192.168.31.131:7070/haruka/bili-video/"
             )
         )
-        self.assertEqual(download_call.kwargs["thread_count"], 1)
-        self.assertEqual(download_call.kwargs["headers"], "User-Agent: NapCat")
+        self.assertNotIn("thread_count", download_call.kwargs)
+        self.assertNotIn("headers", download_call.kwargs)
         self.assertEqual(
             download_call.kwargs["_timeout"],
             Config().haruka_bili_video_timeout,
