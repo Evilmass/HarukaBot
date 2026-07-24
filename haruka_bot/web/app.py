@@ -425,7 +425,11 @@ async def _get_bot_snapshot(force: bool = False) -> Dict[str, Any]:
         return _bot_cache["value"]
     async with _bot_cache_lock:
         now = time.monotonic()
-        if not force and _bot_cache["value"] is not None and _bot_cache["expires"] > now:
+        if (
+            not force
+            and _bot_cache["value"] is not None
+            and _bot_cache["expires"] > now
+        ):
             return _bot_cache["value"]
         value = await _build_bot_snapshot()
         _bot_cache.update({"expires": now + BOT_CACHE_SECONDS, "value": value})
@@ -544,6 +548,8 @@ async def _subscription_rows(force_options: bool = False) -> List[Dict[str, Any]
     try:
         from ..plugins.pusher.live_pusher import (
             live_snapshot,
+        )
+        from ..plugins.pusher.live_pusher import (
             status as live_status_map,
         )
     except ImportError:
@@ -777,6 +783,8 @@ def _filter_subscription_rows(
     q: str = "",
     target_type: Optional[str] = None,
     live_enabled: Optional[bool] = None,
+    dynamic_enabled: Optional[bool] = None,
+    at_enabled: Optional[bool] = None,
     live_status: Optional[str] = None,
     uid: Optional[int] = None,
     room_id: Optional[int] = None,
@@ -800,7 +808,9 @@ def _filter_subscription_rows(
         rows = [
             row
             for row in rows
-            if any(query in str(row.get(field) or "").casefold() for field in searchable)
+            if any(
+                query in str(row.get(field) or "").casefold() for field in searchable
+            )
         ]
     exact_filters = {
         "target_type": target_type,
@@ -815,6 +825,10 @@ def _filter_subscription_rows(
             rows = [row for row in rows if row.get(field) == value]
     if live_enabled is not None:
         rows = [row for row in rows if row["live"] is live_enabled]
+    if dynamic_enabled is not None:
+        rows = [row for row in rows if row["dynamic"] is dynamic_enabled]
+    if at_enabled is not None:
+        rows = [row for row in rows if row["at"] is at_enabled]
     if bot_online is not None:
         rows = [row for row in rows if row["bot_online"] is bot_online]
     return rows
@@ -853,6 +867,8 @@ async def list_subscriptions(
     q: str = Query("", max_length=100),
     target_type: Optional[str] = Query(None),
     live_enabled: Optional[bool] = Query(None),
+    dynamic_enabled: Optional[bool] = Query(None),
+    at_enabled: Optional[bool] = Query(None),
     live_status: Optional[str] = Query(
         None,
         regex="^(live|offline|unknown)$",
@@ -885,6 +901,8 @@ async def list_subscriptions(
         q=q,
         target_type=target_type,
         live_enabled=live_enabled,
+        dynamic_enabled=dynamic_enabled,
+        at_enabled=at_enabled,
         live_status=live_status,
         uid=uid,
         room_id=room_id,
@@ -903,9 +921,7 @@ async def list_subscriptions(
         "live_total": sum(row["live_status"] == "live" for row in rows),
         "enabled_total": sum(bool(row["live"]) for row in rows),
         "summary_total": len(all_rows),
-        "summary_live_total": sum(
-            row["live_status"] == "live" for row in all_rows
-        ),
+        "summary_live_total": sum(row["live_status"] == "live" for row in all_rows),
         "summary_enabled_total": sum(bool(row["live"]) for row in all_rows),
         "page": page,
         "page_size": page_size,
@@ -1304,7 +1320,9 @@ async def list_audit(
 
 
 def _export_filename(extension: str) -> str:
-    return f"haruka-subscriptions-{datetime.now().astimezone():%Y%m%d-%H%M%S}.{extension}"
+    return (
+        f"haruka-subscriptions-{datetime.now().astimezone():%Y%m%d-%H%M%S}.{extension}"
+    )
 
 
 @router.get("/api/export.json")
@@ -1355,13 +1373,17 @@ async def export_csv(_session: Dict[str, Any] = Depends(require_auth)):
         export_row["room_url"] = (
             f"https://live.bilibili.com/{row['room_id']}" if row["room_id"] else ""
         )
-        export_row["live_status"] = status_names.get(row["live_status"], row["live_status"])
+        export_row["live_status"] = status_names.get(
+            row["live_status"], row["live_status"]
+        )
         export_row["target_type"] = target_names.get(
             row["target_type"], row["target_type"]
         )
         for key in ("bot_online", "live", "dynamic", "at"):
             export_row[key] = "是" if export_row[key] else "否"
-        writer.writerow({label: export_row.get(key, "") for key, label in headers.items()})
+        writer.writerow(
+            {label: export_row.get(key, "") for key, label in headers.items()}
+        )
 
     return Response(
         content=("\ufeff" + stream.getvalue()).encode("utf-8"),

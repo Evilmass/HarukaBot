@@ -23,6 +23,8 @@ const state = {
   sortBy: "live_status",
   sortOrder: "asc",
   selectedIds: new Set(),
+  lastClickedIndex: -1,
+  featureFilters: { live: null, dynamic: null, at: null },
 };
 
 const AUTO_REFRESH_INTERVAL_MS = 15_000;
@@ -95,6 +97,7 @@ function showLogin(message = "") {
   state.enabledTotal = 0;
   state.page = 1;
   state.selectedIds.clear();
+  state.lastClickedIndex = -1;
   state.summaryFilter = "all";
   appView.classList.add("hidden");
   loginView.classList.remove("hidden");
@@ -206,40 +209,39 @@ function renderTable(items) {
           <div class="streamer-cell">
             <span class="avatar">${avatarContents(item)}</span>
             <div>
-              <strong>${escapeHtml(item.name || `UID ${item.uid}`)}</strong>
-              <span>
-                UID ${escapeHtml(item.uid)}
-                ·
-                ${item.room_id ? `房间 ${escapeHtml(item.room_id)}` : "房间未知"}
-              </span>
+              <a class="streamer-name" href="https://space.bilibili.com/${escapeHtml(item.uid)}" target="_blank" rel="noopener" title="打开用户空间">${escapeHtml(item.name || `UID ${item.uid}`)}</a>
+              <span>UID：<a class="streamer-uid" href="https://space.bilibili.com/${escapeHtml(item.uid)}" target="_blank" rel="noopener">${escapeHtml(item.uid)}</a></span>
+              <span>${item.room_id ? `直播间：<a class="streamer-room" href="https://live.bilibili.com/${escapeHtml(item.room_id)}" target="_blank" rel="noopener">${escapeHtml(item.room_id)}</a>` : "房间未知"}</span>
             </div>
           </div>
         </td>
         <td>
           ${statusBadge(item.live_status)}
           <span class="status-meta">${escapeHtml(formatDateTime(item.checked_at))}</span>
-          ${
-            item.live_status === "live"
-              ? `<span class="status-meta">${escapeHtml(item.live_title || "直播中")}</span>
+          ${item.live_status === "live"
+          ? `<span class="status-meta">${escapeHtml(item.live_title || "直播中")}</span>
                  <span class="status-meta">${escapeHtml([item.live_area, formatDuration(item.current_live_duration)].filter(Boolean).join(" · "))}</span>`
-              : ""
-          }
+          : ""
+        }
         </td>
         <td>
           <div class="target-cell">
-            <strong>
-              ${escapeHtml(targetTypeName(item.target_type))}
-              · ${escapeHtml(targetLabel(item))}
-            </strong>
-            <span>${escapeHtml(item.target_name && item.target_type === "group" ? item.target_name : `目标 ID ${item.target_id}`)}</span>
+            <strong>${escapeHtml(targetTypeName(item.target_type))}</strong>
+            ${item.target_type === "group"
+          ? `<span>群名：${escapeHtml(item.target_name || "未知")}</span><span>群号：${escapeHtml(item.target_id)}</span>`
+          : item.target_type === "guild"
+            ? `<span>频道：${escapeHtml(item.guild_id || "")}</span><span>子频道：${escapeHtml(item.channel_id || "")}</span>`
+            : `<span>目标 ID：${escapeHtml(item.target_id)}</span>`
+        }
           </div>
         </td>
         <td>
           <div class="bot-cell">
             <span class="online-dot ${item.bot_online ? "online" : ""}"></span>
             <div>
-              <strong>${escapeHtml(item.bot_name || item.bot_id)}</strong>
-              <span>${escapeHtml(item.bot_name ? `QQ ${item.bot_id}` : item.bot_online ? "在线" : "离线或未连接")}</span>
+              <strong>QQ：${escapeHtml(item.bot_id)}</strong>
+              ${item.bot_name ? `<span>${escapeHtml(item.bot_name)}</span>` : ""}
+              ${item.bot_online ? "" : `<span>离线或未连接</span>`}
               ${pushResult(item)}
             </div>
           </div>
@@ -247,11 +249,6 @@ function renderTable(items) {
         <td>${featureBadges(item)}</td>
         <td>
           <div class="row-actions">
-            ${
-              item.room_id
-                ? `<a class="row-button" href="https://live.bilibili.com/${encodeURIComponent(item.room_id)}" target="_blank" rel="noopener">直播间</a>`
-                : ""
-            }
             <button class="row-button" data-action="test" data-id="${item.id}" type="button">测试推送</button>
             <button class="row-button" data-action="edit" data-id="${item.id}" type="button">编辑</button>
             <button class="row-button danger" data-action="delete" data-id="${item.id}" type="button">删除</button>
@@ -272,19 +269,21 @@ function renderMobile(items) {
           <div class="streamer-cell">
             <span class="avatar">${avatarContents(item)}</span>
             <div>
-              <strong>${escapeHtml(item.name || `UID ${item.uid}`)}</strong>
-              <span>UID ${escapeHtml(item.uid)} · ${item.room_id ? `房间 ${escapeHtml(item.room_id)}` : "房间未知"}</span>
+              <a class="streamer-name" href="https://space.bilibili.com/${escapeHtml(item.uid)}" target="_blank" rel="noopener">${escapeHtml(item.name || `UID ${item.uid}`)}</a>
+              <span>UID：${escapeHtml(item.uid)} · ${item.room_id ? `直播间：${escapeHtml(item.room_id)}` : "房间未知"}</span>
             </div>
           </div>
           ${statusBadge(item.live_status)}
         </div>
         <div class="mobile-detail">
           <span>${escapeHtml(targetTypeName(item.target_type))} · ${escapeHtml(targetLabel(item))}</span>
-          <span>机器人 ${escapeHtml(item.bot_name || item.bot_id)}</span>
+          <span>QQ：${escapeHtml(item.bot_id)}</span>
         </div>
         <div class="mobile-detail"><span>检测：${escapeHtml(formatDateTime(item.checked_at))}</span>${pushResult(item)}</div>
         <div class="mobile-detail">${featureBadges(item)}</div>
         <div class="mobile-card-actions">
+          <a class="row-button" href="https://space.bilibili.com/${escapeHtml(item.uid)}" target="_blank" rel="noopener">空间</a>
+          ${item.room_id ? `<a class="row-button" href="https://live.bilibili.com/${escapeHtml(item.room_id)}" target="_blank" rel="noopener">直播间</a>` : ""}
           <button class="row-button" data-action="test" data-id="${item.id}" type="button">测试推送</button>
           <button class="row-button" data-action="edit" data-id="${item.id}" type="button">编辑</button>
           <button class="row-button danger" data-action="delete" data-id="${item.id}" type="button">删除</button>
@@ -298,26 +297,23 @@ function render() {
   const items = state.items;
   $("#stat-total").textContent = state.summaryTotal;
   $("#stat-live").textContent = state.liveTotal;
-  $("#stat-enabled").textContent = state.enabledTotal;
   $("#stat-bots").textContent = state.bots.filter((bot) => bot.online).length;
 
   const initialLoading = state.loading && !state.subscriptionsInitialized;
   const empty = state.subscriptionsInitialized && items.length === 0;
-  $("#empty-state").classList.toggle("hidden", !empty);
-  $("#desktop-table").classList.toggle(
-    "hidden",
-    initialLoading || empty,
-  );
-  $("#mobile-list").classList.toggle(
-    "hidden",
-    initialLoading || empty,
-  );
+  const hasActiveFilter = state.featureFilters.live || state.featureFilters.dynamic || state.featureFilters.at;
+  // 有筛选条件时即使结果为空也保留表头，方便取消筛选
+  const hideTable = initialLoading || (empty && !hasActiveFilter);
+  $("#empty-state").classList.toggle("hidden", !empty || hasActiveFilter);
+  $("#desktop-table").classList.toggle("hidden", hideTable);
+  $("#mobile-list").classList.toggle("hidden", hideTable);
   renderTable(items);
   renderMobile(items);
   renderSummaryState();
   renderBulkToolbar();
   renderSortState();
   renderPagination();
+  updateFilterChips();
 }
 
 function renderSummaryState() {
@@ -326,6 +322,23 @@ function renderSummaryState() {
     card.classList.toggle("active", active);
     card.setAttribute("aria-pressed", String(active));
   });
+}
+
+function updateFilterChips() {
+  let anyActive = false;
+  document.querySelectorAll(".seg-btn").forEach((chip) => {
+    const filterKey = chip.dataset.filter;
+    const value = state.featureFilters[filterKey];
+    chip.classList.toggle("active", !!value);
+    chip.setAttribute("aria-pressed", String(!!value));
+    if (value) {
+      chip.title = "已筛选：已开启 · 点击取消";
+      anyActive = true;
+    } else {
+      chip.title = "点击筛选已开启的通知";
+    }
+  });
+  document.querySelector(".panel").classList.toggle("has-filters", anyActive);
 }
 
 function renderSortState() {
@@ -340,10 +353,9 @@ function renderSortState() {
 
 function renderBulkToolbar() {
   const count = state.selectedIds.size;
-  $("#bulk-toolbar").classList.toggle(
-    "hidden",
-    count === 0,
-  );
+  const bar = $("#bulk-toolbar");
+  bar.classList.toggle("hidden", count === 0);
+  bar.classList.toggle("visible", count > 0);
   $("#selected-count").textContent = `已选择 ${count} 条`;
   const pageIds = state.items.map((item) => item.id);
   const checked = pageIds.length > 0 && pageIds.every((id) => state.selectedIds.has(id));
@@ -370,8 +382,10 @@ function filtersQuery() {
   const q = $("#search-input").value.trim();
   if (q) params.set("q", q);
   if (state.summaryFilter === "live") params.set("live_status", "live");
-  if (state.summaryFilter === "enabled") params.set("live_enabled", "true");
   if (state.summaryFilter === "online-bots") params.set("bot_online", "true");
+  if (state.featureFilters.live !== null) params.set("live_enabled", String(state.featureFilters.live));
+  if (state.featureFilters.dynamic !== null) params.set("dynamic_enabled", String(state.featureFilters.dynamic));
+  if (state.featureFilters.at !== null) params.set("at_enabled", String(state.featureFilters.at));
   params.set("sort_by", state.sortBy);
   params.set("sort_order", state.sortOrder);
   params.set("page", String(state.page));
@@ -382,6 +396,7 @@ function filtersQuery() {
 function resetAndLoadSubscriptions() {
   state.page = 1;
   state.selectedIds.clear();
+  state.lastClickedIndex = -1;
   return loadSubscriptions();
 }
 
@@ -745,9 +760,27 @@ function handleSelection(event) {
   const checkbox = event.target.closest(".row-select");
   if (!checkbox) return;
   const id = Number(checkbox.dataset.id);
-  if (checkbox.checked) state.selectedIds.add(id);
-  else state.selectedIds.delete(id);
+  const currentIndex = state.items.findIndex((item) => item.id === id);
+  const shiftKey = event.shiftKey;
+
+  if (shiftKey && state.lastClickedIndex >= 0 && currentIndex >= 0) {
+    // Shift+click: range select between last clicked and current
+    const start = Math.min(state.lastClickedIndex, currentIndex);
+    const end = Math.max(state.lastClickedIndex, currentIndex);
+    const rangeIds = state.items.slice(start, end + 1).map((item) => item.id);
+    if (checkbox.checked) {
+      rangeIds.forEach((rid) => state.selectedIds.add(rid));
+    } else {
+      rangeIds.forEach((rid) => state.selectedIds.delete(rid));
+    }
+  } else {
+    // Normal click: toggle single
+    if (checkbox.checked) state.selectedIds.add(id);
+    else state.selectedIds.delete(id);
+  }
+  state.lastClickedIndex = currentIndex;
   renderBulkToolbar();
+  render();
 }
 
 async function applyBulkAction() {
@@ -881,6 +914,7 @@ $("#select-page").addEventListener("change", (event) => {
 document.querySelectorAll("[data-summary-filter]").forEach((card) => {
   card.addEventListener("click", () => {
     state.summaryFilter = card.dataset.summaryFilter;
+    state.featureFilters = { live: null, dynamic: null, at: null };
     renderSummaryState();
     resetAndLoadSubscriptions();
   });
@@ -907,6 +941,7 @@ $("#bulk-action").addEventListener("change", () => {
 $("#bulk-apply").addEventListener("click", applyBulkAction);
 $("#bulk-clear").addEventListener("click", () => {
   state.selectedIds.clear();
+  state.lastClickedIndex = -1;
   render();
 });
 document.addEventListener(
@@ -934,6 +969,16 @@ $("#search-input").addEventListener(
   "input",
   debounce(resetAndLoadSubscriptions, 280),
 );
+document.querySelectorAll(".seg-btn").forEach((chip) => {
+  chip.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const filterKey = chip.dataset.filter;
+    // Toggle: 未选 → 选中（只看已开启），选中 → 取消（不筛选）
+    state.featureFilters[filterKey] = state.featureFilters[filterKey] ? null : true;
+    updateFilterChips();
+    resetAndLoadSubscriptions();
+  });
+});
 $("#page-size-input").addEventListener("change", () => {
   state.pageSize = Number($("#page-size-input").value);
   state.page = 1;
