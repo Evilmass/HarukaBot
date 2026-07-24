@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: qqbot
     image: haruka-bot:local
     init: true
     ipc: host
@@ -20,6 +21,9 @@ services:
       - ./logs:/app/logs
     ports:
       - "${HARUKA_HOST_PORT:-7070}:7070"
+    logging:
+      options:
+        max-size: 10m
     healthcheck:
       test:
         - CMD
