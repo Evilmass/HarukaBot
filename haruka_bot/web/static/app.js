@@ -10,8 +10,21 @@ const state = {
   subscriptionController: null,
   optionsRequestId: 0,
   optionsController: null,
+  autoRefreshTimer: null,
+  sourceType: "uid",
+  page: 1,
+  pageSize: 10,
+  total: 0,
+  summaryTotal: 0,
+  liveTotal: 0,
+  enabledTotal: 0,
+  summaryFilter: "all",
+  sortBy: "live_status",
+  sortOrder: "asc",
+  selectedIds: new Set(),
 };
 
+const AUTO_REFRESH_INTERVAL_MS = 15_000;
 const $ = (selector) => document.querySelector(selector);
 const loginView = $("#login-view");
 const appView = $("#app-view");
@@ -64,6 +77,7 @@ async function api(path, options = {}) {
 }
 
 function showLogin(message = "") {
+  stopAutoRefresh();
   state.subscriptionRequestId += 1;
   state.optionsRequestId += 1;
   state.subscriptionController?.abort();
@@ -72,6 +86,14 @@ function showLogin(message = "") {
   state.optionsController = null;
   state.loading = false;
   state.optionsLoading = false;
+  state.items = [];
+  state.total = 0;
+  state.summaryTotal = 0;
+  state.liveTotal = 0;
+  state.enabledTotal = 0;
+  state.page = 1;
+  state.selectedIds.clear();
+  state.summaryFilter = "all";
   appView.classList.add("hidden");
   loginView.classList.remove("hidden");
   $("#login-error").textContent = message;
@@ -82,6 +104,7 @@ function showLogin(message = "") {
 function showApp() {
   loginView.classList.add("hidden");
   appView.classList.remove("hidden");
+  startAutoRefresh();
 }
 
 function toast(message, type = "success") {
@@ -96,6 +119,7 @@ function setLoading(loading) {
   state.loading = loading;
   $("#loading-state").classList.toggle("hidden", !loading);
   updateBusyState();
+  renderPagination();
 }
 
 function updateBusyState() {
@@ -103,6 +127,7 @@ function updateBusyState() {
     state.loading || state.optionsLoading || state.mutationLoading;
   $("#add-button").disabled = state.mutationLoading;
   $("#export-toggle").disabled = state.exporting;
+  $("#bulk-apply").disabled = state.mutationLoading;
   document.querySelectorAll("[data-action]").forEach((button) => {
     button.disabled = state.mutationLoading;
   });
@@ -115,6 +140,19 @@ function setMutationLoading(loading) {
 
 function targetTypeName(type) {
   return { group: "QQ群", private: "私聊", guild: "频道" }[type] || type;
+}
+
+function formatDateTime(timestamp) {
+  if (!timestamp) return "尚未检测";
+  return new Date(timestamp * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatDuration(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  if (hours) return `${hours} 小时 ${minutes} 分钟`;
+  return `${minutes} 分钟`;
 }
 
 function statusBadge(status) {
@@ -146,24 +184,50 @@ function avatarContents(item) {
   return `<span class="avatar-fallback">${fallback}</span>${image}`;
 }
 
+function pushResult(item) {
+  if (!item.last_push_at) return `<span class="push-result muted">尚无推送记录</span>`;
+  const stateClass = item.last_push_success ? "success" : "failed";
+  const label = item.last_push_success ? "最近推送成功" : `推送失败：${item.last_push_error || "未知原因"}`;
+  return `<span class="push-result ${stateClass}" title="${escapeHtml(formatDateTime(item.last_push_at))}">${escapeHtml(label)}</span>`;
+}
+
 function renderTable(items) {
   $("#subscription-table").innerHTML = items
     .map(
       (item) => `
       <tr>
+        <td class="select-column">
+          <input class="row-select" type="checkbox" data-id="${item.id}" aria-label="选择订阅" ${state.selectedIds.has(item.id) ? "checked" : ""}>
+        </td>
         <td>
           <div class="streamer-cell">
             <span class="avatar">${avatarContents(item)}</span>
             <div>
               <strong>${escapeHtml(item.name || `UID ${item.uid}`)}</strong>
-              <span>UID ${escapeHtml(item.uid)} · 房间 ${escapeHtml(item.room_id || "未知")}</span>
+              <span>
+                UID ${escapeHtml(item.uid)}
+                ·
+                ${item.room_id ? `房间 ${escapeHtml(item.room_id)}` : "房间未知"}
+              </span>
             </div>
           </div>
         </td>
-        <td>${statusBadge(item.live_status)}</td>
+        <td>
+          ${statusBadge(item.live_status)}
+          <span class="status-meta">${escapeHtml(formatDateTime(item.checked_at))}</span>
+          ${
+            item.live_status === "live"
+              ? `<span class="status-meta">${escapeHtml(item.live_title || "直播中")}</span>
+                 <span class="status-meta">${escapeHtml([item.live_area, formatDuration(item.current_live_duration)].filter(Boolean).join(" · "))}</span>`
+              : ""
+          }
+        </td>
         <td>
           <div class="target-cell">
-            <strong>${escapeHtml(targetTypeName(item.target_type))} · ${escapeHtml(targetLabel(item))}</strong>
+            <strong>
+              ${escapeHtml(targetTypeName(item.target_type))}
+              · ${escapeHtml(targetLabel(item))}
+            </strong>
             <span>${escapeHtml(item.target_name && item.target_type === "group" ? item.target_name : `目标 ID ${item.target_id}`)}</span>
           </div>
         </td>
@@ -173,6 +237,7 @@ function renderTable(items) {
             <div>
               <strong>${escapeHtml(item.bot_name || item.bot_id)}</strong>
               <span>${escapeHtml(item.bot_name ? `QQ ${item.bot_id}` : item.bot_online ? "在线" : "离线或未连接")}</span>
+              ${pushResult(item)}
             </div>
           </div>
         </td>
@@ -184,6 +249,7 @@ function renderTable(items) {
                 ? `<a class="row-button" href="https://live.bilibili.com/${encodeURIComponent(item.room_id)}" target="_blank" rel="noopener">直播间</a>`
                 : ""
             }
+            <button class="row-button" data-action="test" data-id="${item.id}" type="button">测试推送</button>
             <button class="row-button" data-action="edit" data-id="${item.id}" type="button">编辑</button>
             <button class="row-button danger" data-action="delete" data-id="${item.id}" type="button">删除</button>
           </div>
@@ -199,11 +265,12 @@ function renderMobile(items) {
       (item) => `
       <article class="mobile-card">
         <div class="mobile-card-header">
+          <input class="row-select" type="checkbox" data-id="${item.id}" aria-label="选择订阅" ${state.selectedIds.has(item.id) ? "checked" : ""}>
           <div class="streamer-cell">
             <span class="avatar">${avatarContents(item)}</span>
             <div>
               <strong>${escapeHtml(item.name || `UID ${item.uid}`)}</strong>
-              <span>UID ${escapeHtml(item.uid)} · 房间 ${escapeHtml(item.room_id || "未知")}</span>
+              <span>UID ${escapeHtml(item.uid)} · ${item.room_id ? `房间 ${escapeHtml(item.room_id)}` : "房间未知"}</span>
             </div>
           </div>
           ${statusBadge(item.live_status)}
@@ -212,8 +279,10 @@ function renderMobile(items) {
           <span>${escapeHtml(targetTypeName(item.target_type))} · ${escapeHtml(targetLabel(item))}</span>
           <span>机器人 ${escapeHtml(item.bot_name || item.bot_id)}</span>
         </div>
+        <div class="mobile-detail"><span>检测：${escapeHtml(formatDateTime(item.checked_at))}</span>${pushResult(item)}</div>
         <div class="mobile-detail">${featureBadges(item)}</div>
         <div class="mobile-card-actions">
+          <button class="row-button" data-action="test" data-id="${item.id}" type="button">测试推送</button>
           <button class="row-button" data-action="edit" data-id="${item.id}" type="button">编辑</button>
           <button class="row-button danger" data-action="delete" data-id="${item.id}" type="button">删除</button>
         </div>
@@ -224,28 +293,92 @@ function renderMobile(items) {
 
 function render() {
   const items = state.items;
-  $("#stat-total").textContent = items.length;
-  $("#stat-live").textContent = items.filter((item) => item.live_status === "live").length;
-  $("#stat-enabled").textContent = items.filter((item) => item.live).length;
+  $("#stat-total").textContent = state.summaryTotal;
+  $("#stat-live").textContent = state.liveTotal;
+  $("#stat-enabled").textContent = state.enabledTotal;
   $("#stat-bots").textContent = state.bots.filter((bot) => bot.online).length;
 
   const empty = !state.loading && items.length === 0;
   $("#empty-state").classList.toggle("hidden", !empty);
-  $("#desktop-table").classList.toggle("hidden", state.loading || empty);
-  $("#mobile-list").classList.toggle("hidden", state.loading || empty);
+  $("#desktop-table").classList.toggle(
+    "hidden",
+    state.loading || empty,
+  );
+  $("#mobile-list").classList.toggle(
+    "hidden",
+    state.loading || empty,
+  );
   renderTable(items);
   renderMobile(items);
+  renderSummaryState();
+  renderBulkToolbar();
+  renderSortState();
+  renderPagination();
+}
+
+function renderSummaryState() {
+  document.querySelectorAll("[data-summary-filter]").forEach((card) => {
+    const active = card.dataset.summaryFilter === state.summaryFilter;
+    card.classList.toggle("active", active);
+    card.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function renderSortState() {
+  document.querySelectorAll("[data-sort]").forEach((button) => {
+    const active = button.dataset.sort === state.sortBy;
+    button.classList.toggle("active", active);
+    button.dataset.direction = active ? state.sortOrder : "";
+    const base = button.textContent.replace(/\s[↑↓]$/, "");
+    button.textContent = `${base}${active ? (state.sortOrder === "asc" ? " ↑" : " ↓") : ""}`;
+  });
+}
+
+function renderBulkToolbar() {
+  const count = state.selectedIds.size;
+  $("#bulk-toolbar").classList.toggle(
+    "hidden",
+    count === 0,
+  );
+  $("#selected-count").textContent = `已选择 ${count} 条`;
+  const pageIds = state.items.map((item) => item.id);
+  const checked = pageIds.length > 0 && pageIds.every((id) => state.selectedIds.has(id));
+  $("#select-page").checked = checked;
+  $("#select-page").indeterminate =
+    !checked && pageIds.some((id) => state.selectedIds.has(id));
+}
+
+function renderPagination() {
+  const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
+  const hidden = state.loading || state.total === 0;
+  $("#pagination").classList.toggle("hidden", hidden);
+  $("#page-size-input").value = String(state.pageSize);
+  $("#page-info").textContent =
+    `第 ${state.page} / ${totalPages} 页，共 ${state.total} 条`;
+  $("#page-first").disabled = state.page <= 1;
+  $("#page-prev").disabled = state.page <= 1;
+  $("#page-next").disabled = state.page >= totalPages;
+  $("#page-last").disabled = state.page >= totalPages;
 }
 
 function filtersQuery() {
   const params = new URLSearchParams();
   const q = $("#search-input").value.trim();
-  const type = $("#type-filter").value;
-  const live = $("#live-filter").value;
   if (q) params.set("q", q);
-  if (type) params.set("target_type", type);
-  if (live) params.set("live_enabled", live);
+  if (state.summaryFilter === "live") params.set("live_status", "live");
+  if (state.summaryFilter === "enabled") params.set("live_enabled", "true");
+  if (state.summaryFilter === "online-bots") params.set("bot_online", "true");
+  params.set("sort_by", state.sortBy);
+  params.set("sort_order", state.sortOrder);
+  params.set("page", String(state.page));
+  params.set("page_size", String(state.pageSize));
   return params.toString();
+}
+
+function resetAndLoadSubscriptions() {
+  state.page = 1;
+  state.selectedIds.clear();
+  return loadSubscriptions();
 }
 
 async function loadSubscriptions() {
@@ -260,6 +393,12 @@ async function loadSubscriptions() {
     });
     if (requestId !== state.subscriptionRequestId) return false;
     state.items = payload.items;
+    state.total = payload.total;
+    state.summaryTotal = payload.summary_total;
+    state.liveTotal = payload.summary_live_total;
+    state.enabledTotal = payload.summary_enabled_total;
+    state.page = payload.page;
+    state.pageSize = payload.page_size;
     render();
     return true;
   } catch (error) {
@@ -325,57 +464,130 @@ async function refreshData(successMessage = "") {
   return succeeded;
 }
 
+function startAutoRefresh() {
+  stopAutoRefresh();
+  state.autoRefreshTimer = window.setInterval(() => {
+    if (
+      document.visibilityState === "visible" &&
+      modal.classList.contains("hidden") &&
+      !state.loading &&
+      !state.mutationLoading
+    ) {
+      loadSubscriptions();
+    }
+  }, AUTO_REFRESH_INTERVAL_MS);
+}
+
+function stopAutoRefresh() {
+  if (state.autoRefreshTimer !== null) {
+    window.clearInterval(state.autoRefreshTimer);
+    state.autoRefreshTimer = null;
+  }
+}
+
 function renderGroupOptions() {
   const botId = Number($("#bot-input").value);
   const bot = state.bots.find((item) => item.id === botId);
-  const groups = bot?.groups || [];
+  const groups = $("#target-type-input").value === "group" ? bot?.groups || [] : [];
   $("#group-options").innerHTML = groups
     .map((group) => `<option value="${group.id}">${escapeHtml(group.name || `群 ${group.id}`)}</option>`)
     .join("");
+}
+
+function updateTargetFields() {
+  const targetTypeInput = $("#target-type-input");
+  const targetIdInput = $("#target-id-input");
+  const guildIdInput = $("#guild-id-input");
+  const channelIdInput = $("#channel-id-input");
+  const targetType = state.editing?.target_type || targetTypeInput.value;
+  const editing = Boolean(state.editing);
+  const guild = targetType === "guild";
+  const privateTarget = targetType === "private";
+
+  targetTypeInput.value = targetType;
+  targetTypeInput.disabled = editing;
+  $("#target-id-field").classList.toggle("hidden", guild);
+  $("#guild-target-fields").classList.toggle("hidden", !guild);
+  targetIdInput.disabled = guild || (editing && targetType !== "group");
+  targetIdInput.required = !guild && (!editing || targetType === "group");
+  guildIdInput.disabled = !guild || editing;
+  channelIdInput.disabled = !guild || editing;
+  guildIdInput.required = guild && !editing;
+  channelIdInput.required = guild && !editing;
+  $("#target-id-label").textContent = privateTarget ? "接收私聊的 QQ" : "通知群号";
+  targetIdInput.placeholder = privateTarget ? "请输入接收者 QQ" : "选择或手动输入";
+  if (targetType === "group") {
+    targetIdInput.setAttribute("list", "group-options");
+  } else {
+    targetIdInput.removeAttribute("list");
+  }
+
+  $("#immutable-target-note").classList.toggle(
+    "hidden",
+    !editing || targetType === "group",
+  );
+  $("#at-switch").disabled = privateTarget;
+  if (privateTarget) $("#at-switch").checked = false;
+  renderGroupOptions();
+}
+
+function setSourceType(sourceType, focus = true) {
+  state.sourceType = sourceType === "room" ? "room" : "uid";
+  const uidSelected = state.sourceType === "uid";
+  $("#source-type-input").value = state.sourceType;
+  $("#source-value-label").textContent = uidSelected ? "用户 UID" : "直播间号";
+  $("#source-value-input").placeholder = uidSelected
+    ? "请输入 B站用户 UID"
+    : "请输入直播间号";
+  $("#source-value-input").required = true;
+  if (focus) $("#source-value-input").focus();
 }
 
 function openCreateModal() {
   state.editing = null;
   $("#modal-title").textContent = "新增直播监控";
   $("#subscription-id").value = "";
-  $("#room-field").classList.remove("hidden");
-  $("#room-input").required = true;
-  $("#room-input").value = "";
+  $("#source-field").classList.remove("hidden");
+  $("#source-value-input").value = "";
   $("#editing-streamer").classList.add("hidden");
   $("#immutable-target-note").classList.add("hidden");
+  $("#target-type-input").disabled = false;
+  $("#target-type-input").value = "group";
   $("#bot-input").disabled = false;
-  $("#group-input").disabled = false;
   $("#bot-input").value = state.bots.find((bot) => bot.online)?.id || "";
-  $("#group-input").value = "";
+  $("#target-id-input").value = "";
+  $("#guild-id-input").value = "";
+  $("#channel-id-input").value = "";
   $("#live-switch").checked = true;
   $("#dynamic-switch").checked = false;
   $("#at-switch").checked = false;
   $("#subscription-error").textContent = "";
-  renderGroupOptions();
+  setSourceType("uid", false);
+  updateTargetFields();
   modal.classList.remove("hidden");
-  setTimeout(() => $("#room-input").focus(), 0);
+  setTimeout(() => $("#source-value-input").focus(), 0);
 }
 
 function openEditModal(item) {
   state.editing = item;
   $("#modal-title").textContent = "编辑直播订阅";
   $("#subscription-id").value = item.id;
-  $("#room-field").classList.add("hidden");
-  $("#room-input").required = false;
+  $("#source-field").classList.add("hidden");
+  $("#source-value-input").required = false;
   $("#editing-streamer").classList.remove("hidden");
   $("#editing-avatar").innerHTML = avatarContents(item);
   $("#editing-name").textContent = item.name || `UID ${item.uid}`;
   $("#editing-meta").textContent = `UID ${item.uid} · 直播间 ${item.room_id || "未知"}`;
+  $("#target-type-input").value = item.target_type;
   $("#bot-input").value = item.bot_id;
-  $("#group-input").value = item.target_id;
-  const targetMutable = item.target_type === "group";
-  $("#group-input").disabled = !targetMutable;
-  $("#immutable-target-note").classList.toggle("hidden", targetMutable);
+  $("#target-id-input").value = item.target_id;
+  $("#guild-id-input").value = item.guild_id || "";
+  $("#channel-id-input").value = item.channel_id || "";
   $("#live-switch").checked = item.live;
   $("#dynamic-switch").checked = item.dynamic;
   $("#at-switch").checked = item.at;
   $("#subscription-error").textContent = "";
-  renderGroupOptions();
+  updateTargetFields();
   modal.classList.remove("hidden");
 }
 
@@ -392,9 +604,10 @@ async function saveSubscription(event) {
   const wasEditing = Boolean(state.editing);
   errorNode.textContent = "";
   const botId = Number($("#bot-input").value);
-  const targetId = Number($("#group-input").value);
-  if (!botId || !targetId) {
-    errorNode.textContent = "请输入有效的机器人 QQ 和通知目标 ID";
+  const targetType = state.editing?.target_type || $("#target-type-input").value;
+  const targetId = Number($("#target-id-input").value);
+  if (!botId) {
+    errorNode.textContent = "请输入有效的机器人 QQ";
     return;
   }
   const payload = {
@@ -408,23 +621,53 @@ async function saveSubscription(event) {
   if (state.editing) {
     path += `/${state.editing.id}`;
     method = "PATCH";
-    if (state.editing.target_type === "group") payload.target_id = targetId;
+    if (state.editing.target_type === "group") {
+      if (!targetId) {
+        errorNode.textContent = "请输入有效的通知群号";
+        return;
+      }
+      payload.target_id = targetId;
+    }
   } else {
-    payload.room = $("#room-input").value.trim();
-    payload.target_id = targetId;
-    if (!payload.room) {
-      errorNode.textContent = "请输入直播间号或链接";
-      return;
+    payload.target_type = targetType;
+    const sourceValue = Number($("#source-value-input").value);
+    if (state.sourceType === "uid") {
+      payload.uid = sourceValue;
+      if (!payload.uid) {
+        errorNode.textContent = "请输入有效的用户 UID";
+        return;
+      }
+    } else {
+      payload.room_id = sourceValue;
+      if (!payload.room_id) {
+        errorNode.textContent = "请输入有效的直播间号";
+        return;
+      }
+    }
+    if (targetType === "guild") {
+      payload.guild_id = $("#guild-id-input").value.trim();
+      payload.channel_id = $("#channel-id-input").value.trim();
+      if (!payload.guild_id || !payload.channel_id) {
+        errorNode.textContent = "请输入频道 ID 和子频道 ID";
+        return;
+      }
+    } else {
+      if (!targetId) {
+        errorNode.textContent =
+          targetType === "private" ? "请输入有效的接收者 QQ" : "请输入有效的通知群号";
+        return;
+      }
+      payload.target_id = targetId;
     }
   }
 
   saveButton.disabled = true;
-  saveButton.textContent = state.editing ? "正在保存…" : "正在解析并添加…";
+  saveButton.textContent = state.editing ? "正在保存…" : "正在添加…";
   setMutationLoading(true);
   try {
     await api(path, { method, body: JSON.stringify(payload) });
     closeModal();
-    await refreshData(wasEditing ? "订阅已更新" : "直播间已加入监控");
+    await refreshData(wasEditing ? "订阅已更新" : "监控已添加");
   } catch (error) {
     errorNode.textContent = error.message;
   } finally {
@@ -443,7 +686,38 @@ async function deleteSubscription(item) {
   setMutationLoading(true);
   try {
     await api(`/admin/api/subscriptions/${item.id}`, { method: "DELETE" });
+    state.selectedIds.delete(item.id);
     await refreshData("订阅已删除");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    setMutationLoading(false);
+  }
+}
+
+function findSubscription(id) {
+  return state.items.find((row) => row.id === id);
+}
+
+async function testPush(item) {
+  if (
+    !window.confirm(
+      `将使用配置机器人 ${item.bot_id} 向 ${targetTypeName(item.target_type)} ${targetLabel(item)} 发送真实测试消息，是否继续？`,
+    )
+  ) {
+    return;
+  }
+  setMutationLoading(true);
+  try {
+    const result = await api(
+      `/admin/api/subscriptions/${item.id}/test-push`,
+      { method: "POST" },
+    );
+    toast(
+      result.success ? "测试推送成功" : `测试推送失败：${result.message}`,
+      result.success ? "success" : "error",
+    );
+    await loadSubscriptions();
   } catch (error) {
     toast(error.message, "error");
   } finally {
@@ -454,10 +728,70 @@ async function deleteSubscription(item) {
 async function handleRowAction(event) {
   const button = event.target.closest("[data-action]");
   if (!button) return;
-  const item = state.items.find((row) => row.id === Number(button.dataset.id));
+  const item = findSubscription(Number(button.dataset.id));
   if (!item) return;
+  if (button.dataset.action === "test") await testPush(item);
   if (button.dataset.action === "edit") openEditModal(item);
   if (button.dataset.action === "delete") await deleteSubscription(item);
+}
+
+function handleSelection(event) {
+  const checkbox = event.target.closest(".row-select");
+  if (!checkbox) return;
+  const id = Number(checkbox.dataset.id);
+  if (checkbox.checked) state.selectedIds.add(id);
+  else state.selectedIds.delete(id);
+  renderBulkToolbar();
+}
+
+async function applyBulkAction() {
+  const action = $("#bulk-action").value;
+  const ids = Array.from(state.selectedIds);
+  if (!action || ids.length === 0) {
+    toast("请选择批量操作", "error");
+    return;
+  }
+  const payload = { ids, operation: action === "delete" ? "delete" : "update" };
+  const updateMap = {
+    live_on: { live: true },
+    live_off: { live: false },
+    dynamic_on: { dynamic: true },
+    dynamic_off: { dynamic: false },
+    at_on: { at: true },
+    at_off: { at: false },
+  };
+  Object.assign(payload, updateMap[action] || {});
+  if (action === "bot") {
+    payload.bot_id = Number($("#bulk-bot-input").value);
+    if (!payload.bot_id) {
+      toast("请输入有效的机器人 QQ", "error");
+      return;
+    }
+  }
+  if (
+    action === "delete" &&
+    !window.confirm(`确定删除已选择的 ${ids.length} 条订阅吗？此操作不可撤销。`)
+  ) {
+    return;
+  }
+
+  setMutationLoading(true);
+  try {
+    const result = await api("/admin/api/subscriptions/bulk", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.selectedIds.clear();
+    toast(
+      `批量操作完成：成功 ${result.processed_ids.length}，缺失 ${result.missing_ids.length}，失败 ${result.failed_ids.length}`,
+      result.failed_ids.length ? "error" : "success",
+    );
+    await loadSubscriptions();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    setMutationLoading(false);
+  }
 }
 
 function debounce(fn, delay) {
@@ -517,8 +851,58 @@ $("#modal-close").addEventListener("click", closeModal);
 $("#modal-cancel").addEventListener("click", closeModal);
 $("#subscription-form").addEventListener("submit", saveSubscription);
 $("#bot-input").addEventListener("input", renderGroupOptions);
+$("#target-type-input").addEventListener("change", () => {
+  $("#target-id-input").value = "";
+  $("#guild-id-input").value = "";
+  $("#channel-id-input").value = "";
+  updateTargetFields();
+});
+$("#source-type-input").addEventListener("change", (event) => {
+  $("#source-value-input").value = "";
+  setSourceType(event.target.value);
+});
 $("#subscription-table").addEventListener("click", handleRowAction);
 $("#mobile-list").addEventListener("click", handleRowAction);
+$("#subscription-table").addEventListener("change", handleSelection);
+$("#mobile-list").addEventListener("change", handleSelection);
+$("#select-page").addEventListener("change", (event) => {
+  state.items.forEach((item) => {
+    if (event.target.checked) state.selectedIds.add(item.id);
+    else state.selectedIds.delete(item.id);
+  });
+  render();
+});
+document.querySelectorAll("[data-summary-filter]").forEach((card) => {
+  card.addEventListener("click", () => {
+    state.summaryFilter = card.dataset.summaryFilter;
+    renderSummaryState();
+    resetAndLoadSubscriptions();
+  });
+});
+document.querySelectorAll("[data-sort]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const sortBy = button.dataset.sort;
+    if (state.sortBy === sortBy) {
+      state.sortOrder = state.sortOrder === "asc" ? "desc" : "asc";
+    } else {
+      state.sortBy = sortBy;
+      state.sortOrder = "asc";
+    }
+    state.page = 1;
+    loadSubscriptions();
+  });
+});
+$("#bulk-action").addEventListener("change", () => {
+  $("#bulk-bot-input").classList.toggle(
+    "hidden",
+    $("#bulk-action").value !== "bot",
+  );
+});
+$("#bulk-apply").addEventListener("click", applyBulkAction);
+$("#bulk-clear").addEventListener("click", () => {
+  state.selectedIds.clear();
+  render();
+});
 document.addEventListener(
   "load",
   (event) => {
@@ -540,9 +924,43 @@ document.addEventListener(
 $("#refresh-button").addEventListener("click", async () => {
   await refreshData("数据已刷新");
 });
-$("#search-input").addEventListener("input", debounce(loadSubscriptions, 280));
-$("#type-filter").addEventListener("change", loadSubscriptions);
-$("#live-filter").addEventListener("change", loadSubscriptions);
+$("#search-input").addEventListener(
+  "input",
+  debounce(resetAndLoadSubscriptions, 280),
+);
+$("#page-size-input").addEventListener("change", () => {
+  state.pageSize = Number($("#page-size-input").value);
+  state.page = 1;
+  loadSubscriptions();
+});
+$("#page-first").addEventListener("click", () => {
+  state.page = 1;
+  loadSubscriptions();
+});
+$("#page-prev").addEventListener("click", () => {
+  if (state.page <= 1) return;
+  state.page -= 1;
+  loadSubscriptions();
+});
+$("#page-next").addEventListener("click", () => {
+  const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
+  if (state.page >= totalPages) return;
+  state.page += 1;
+  loadSubscriptions();
+});
+$("#page-last").addEventListener("click", () => {
+  state.page = Math.max(1, Math.ceil(state.total / state.pageSize));
+  loadSubscriptions();
+});
+document.addEventListener("visibilitychange", () => {
+  if (
+    document.visibilityState === "visible" &&
+    !appView.classList.contains("hidden") &&
+    modal.classList.contains("hidden")
+  ) {
+    loadSubscriptions();
+  }
+});
 $("#export-toggle").addEventListener("click", (event) => {
   event.stopPropagation();
   $("#export-popover").classList.toggle("hidden");

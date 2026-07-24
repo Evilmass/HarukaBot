@@ -26,9 +26,11 @@ from .models import (
     Guild,
     LiveDurationDaily,
     LiveSession,
+    PushDeliveryState,
     Sub,
     User,
     Version,
+    WebAuditLog,
 )
 
 uid_list = {"live": {"list": [], "index": 0}, "dynamic": {"list": [], "index": 0}}
@@ -221,6 +223,76 @@ class DB:
         return await Sub.get(**kwargs)
 
     @classmethod
+    async def get_all_subscription_uids(cls) -> List[int]:
+        values = await Sub.all().distinct().values_list("uid", flat=True)
+        return [int(uid) for uid in values]
+
+    @classmethod
+    async def get_push_delivery_states(cls) -> Dict[int, PushDeliveryState]:
+        return {
+            state.subscription_id: state
+            for state in await PushDeliveryState.all()
+        }
+
+    @classmethod
+    async def record_push_delivery(
+        cls,
+        *,
+        subscription_id: int,
+        attempted_at: int,
+        success: bool,
+        event_type: str,
+        bot_id: int,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ):
+        await PushDeliveryState.update_or_create(
+            subscription_id=subscription_id,
+            defaults={
+                "attempted_at": attempted_at,
+                "success": success,
+                "event_type": event_type[:30],
+                "bot_id": bot_id,
+                "error_code": error_code[:40] if error_code else None,
+                "error_message": error_message[:500] if error_message else None,
+            },
+        )
+
+    @classmethod
+    async def add_web_audit(
+        cls,
+        *,
+        action: str,
+        target_ids: List[int],
+        success: bool,
+        summary: str,
+        actor: str = "web-admin",
+    ):
+        now = int(time.time())
+        await WebAuditLog.create(
+            created_at=now,
+            actor=actor,
+            action=action[:40],
+            target_ids=json.dumps(target_ids, separators=(",", ":")),
+            success=success,
+            summary=summary[:1000],
+        )
+        await WebAuditLog.filter(created_at__lt=now - 90 * 86400).delete()
+        retained_ids = await WebAuditLog.all().order_by(
+            "-created_at",
+            "-id",
+        ).values_list("id", flat=True)
+        overflow_ids = retained_ids[5000:]
+        if overflow_ids:
+            await WebAuditLog.filter(id__in=overflow_ids).delete()
+
+    @classmethod
+    async def get_web_audits(cls, *, offset: int, limit: int):
+        total = await WebAuditLog.all().count()
+        items = await WebAuditLog.all().order_by("-created_at", "-id").offset(offset).limit(limit)
+        return items, total
+
+    @classmethod
     async def get_push_list(cls, uid, func) -> List[Sub]:
         """根据类型和 UID 获取需要推送的 QQ 列表"""
         return await cls.get_subs(uid=uid, **{func: True})
@@ -301,6 +373,7 @@ class DB:
                 return False
             uid = sub.uid
             await Sub.get(id=sub_id).delete()
+            await PushDeliveryState.filter(subscription_id=sub_id).delete()
             await cls.delete_user(uid=uid)
             await cls.update_uid_list()
             return True
@@ -309,7 +382,12 @@ class DB:
     async def delete_sub(cls, uid, type, type_id) -> bool:
         """删除指定订阅"""
         async with get_subscription_lock():
+            sub = await cls.get_sub(uid=uid, type=type, type_id=type_id)
             if await Sub.delete(uid=uid, type=type, type_id=type_id):
+                if sub:
+                    await PushDeliveryState.filter(
+                        subscription_id=sub.id,
+                    ).delete()
                 await cls.delete_user(uid=uid)
                 await cls.update_uid_list()
                 return True

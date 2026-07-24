@@ -3,8 +3,10 @@ import contextlib
 import datetime
 import re
 import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import httpx
 import nonebot
@@ -241,73 +243,121 @@ def calc_time_total(t):
     return total
 
 
-async def safe_send(bot_id, send_type, type_id, message, at=False):
-    """发送出现错误时, 尝试重新发送, 并捕获异常且不会中断运行"""
+@dataclass
+class SendResult:
+    success: bool
+    code: Optional[str]
+    message: str
+    bot_id: int
+    raw: Any = None
 
-    async def _safe_send(bot, send_type, type_id, message):
+
+async def safe_send(
+    bot_id,
+    send_type,
+    type_id,
+    message,
+    at=False,
+    *,
+    allow_fallback=True,
+    cleanup_invalid_target=True,
+    subscription_id=None,
+    event_type="push",
+) -> SendResult:
+    """Send a message and return a structured, non-raising delivery result."""
+
+    async def _send_once(bot, outgoing_message):
         if send_type == "guild":
             from ..database import DB as db
 
             guild = await db.get_guild(id=type_id)
-            assert guild
-            result = await bot.send_guild_channel_msg(
+            if guild is None:
+                raise LookupError("频道目标不存在")
+            return await bot.send_guild_channel_msg(
                 guild_id=guild.guild_id,
                 channel_id=guild.channel_id,
-                message=message,
+                message=outgoing_message,
             )
-        else:
-            result = await bot.call_api(
-                f"send_{send_type}_msg",
-                **{
-                    "message": message,
-                    "user_id" if send_type == "private" else "group_id": type_id,
-                },
-            )
+        return await bot.call_api(
+            f"send_{send_type}_msg",
+            **{
+                "message": outgoing_message,
+                "user_id" if send_type == "private" else "group_id": type_id,
+            },
+        )
+
+    def _failure(error: Exception, attempted_bot_id: int) -> SendResult:
+        if isinstance(error, LookupError):
+            return SendResult(False, "target_not_found", "通知目标不存在", attempted_bot_id)
+        if isinstance(error, NetworkError):
+            return SendResult(False, "network_error", "机器人网络连接失败", attempted_bot_id)
+        if isinstance(error, ActionFailed):
+            info = getattr(error, "info", {}) or {}
+            api_message = str(info.get("msg") or "")
+            if api_message in ("GROUP_NOT_FOUND", "CHANNEL_NOT_FOUND"):
+                return SendResult(False, "target_not_found", "通知目标不存在", attempted_bot_id)
+            if api_message == "SEND_MSG_API_ERROR":
+                return SendResult(False, "risk_control", "账号可能被风控", attempted_bot_id)
+            return SendResult(False, "permission_denied", "机器人权限不足或接口拒绝", attempted_bot_id)
+        return SendResult(False, "unknown_error", "未知发送错误", attempted_bot_id)
+
+    outgoing_message = (
+        MessageSegment.at("all") + "\n" + message if at else message
+    )
+    bots = nonebot.get_bots()
+    candidates = []
+    configured_bot = bots.get(str(bot_id))
+    if configured_bot is not None:
+        candidates.append((int(bot_id), configured_bot))
+    if allow_fallback:
+        candidates.extend(
+            (int(candidate_id), candidate)
+            for candidate_id, candidate in bots.items()
+            if str(candidate_id) != str(bot_id)
+        )
+
+    if not candidates:
+        result = SendResult(False, "bot_offline", "配置机器人未连接", int(bot_id))
+    else:
+        result = SendResult(False, "unknown_error", "未知发送错误", int(bot_id))
+        for candidate_id, candidate in candidates:
+            try:
+                raw = await _send_once(candidate, outgoing_message)
+                result = SendResult(True, None, "发送成功", candidate_id, raw)
+                break
+            except Exception as error:
+                result = _failure(error, candidate_id)
+
+    if subscription_id is not None:
+        from ..database import DB as db
+
+        await db.record_push_delivery(
+            subscription_id=int(subscription_id),
+            attempted_at=int(time.time()),
+            success=result.success,
+            event_type=event_type,
+            bot_id=result.bot_id,
+            error_code=result.code,
+            error_message=None if result.success else result.message,
+        )
+
+    if result.success:
+        logger.info(f"推送成功，Bot（{result.bot_id}）")
         return result
 
-    bots = nonebot.get_bots()
-    bot = bots.get(str(bot_id))
-    if bot is None:
-        logger.error(f"推送失败，Bot（{bot_id}）未连接，尝试使用其他 Bot 推送")
-        for bot_id, bot in bots.items():
-            if at:  # and (send_type == "guild" or (await bot.get_group_at_all_remain(group_id=type_id))["can_at_all"]):
-                message = MessageSegment.at("all") + "\n" + message
-            try:
-                result = await _safe_send(bot, send_type, type_id, message)
-                logger.info(f"尝试使用 Bot（{bot_id}）推送成功")
-                return result
-            except Exception:
-                continue
-        logger.error("尝试失败，所有 Bot 均无法推送")
-        return
+    logger.error(f"推送失败（{result.code}）：{result.message}")
+    if result.code == "target_not_found" and cleanup_invalid_target:
+        from ..database import DB as db
 
-    if at:  # and (send_type == "guild" or (await bot.get_group_at_all_remain(group_id=type_id))["can_at_all"]):
-        message = MessageSegment.at("all") + "\n" + message
-
-    try:
-        return await _safe_send(bot, send_type, type_id, message)
-    except ActionFailed as e:
-        if e.info["msg"] == "GROUP_NOT_FOUND":
-            from ..database import DB as db
-
+        if send_type == "group":
             await db.delete_sub_list(type="group", type_id=type_id)
             await db.delete_group(id=type_id)
-            logger.error(f"推送失败，群（{type_id}）不存在，已自动清理群订阅列表")
-        elif e.info["msg"] == "CHANNEL_NOT_FOUND":
-            from ..database import DB as db
-
+        elif send_type == "guild":
             guild = await db.get_guild(id=type_id)
-            assert guild
             await db.delete_sub_list(type="guild", type_id=type_id)
-            await db.delete_guild(id=type_id)
-            logger.error(f"推送失败，频道（{guild.guild_id}|{guild.channel_id}）不存在，已自动清理频道订阅列表")
-        elif e.info["msg"] == "SEND_MSG_API_ERROR":
-            url = "https://haruka-bot.sk415.icu/usage/faq.html#机器人不发消息也没反应"
-            logger.error(f"推送失败，账号可能被风控（{url}），错误信息：{e.info}")
-        else:
-            logger.error(f"推送失败，未知错误，错误信息：{e.info}")
-    except NetworkError as e:
-        logger.error(f"推送失败，请检查网络连接，错误信息：{e.msg}")
+            if guild:
+                await db.delete_guild(id=type_id)
+    return result
 
 
 async def get_type_id(event: Union[MessageEvent, ChannelDestroyedNoticeEvent]):

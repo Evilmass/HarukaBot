@@ -16,7 +16,7 @@
         <div class="brand-mark" aria-hidden="true">H</div>
         <p class="eyebrow">HARUKABOT CONSOLE</p>
         <h1>直播订阅管理</h1>
-        <p class="muted">管理监控直播间、通知群与推送机器人。</p>
+        <p class="muted">管理监控直播间、通知目标与推送机器人。</p>
         <form id="login-form" class="stack">
           <label>
             <span>管理密码</span>
@@ -61,9 +61,10 @@
           <div>
             <p class="eyebrow">LIVE SUBSCRIPTIONS</p>
             <h1>直播用户管理</h1>
-            <p class="muted">直接添加 B站直播间，并指定接收通知的群和机器人。</p>
+            <p class="muted">通过用户 UID 或直播间号添加监控，并指定通知目标和机器人。</p>
           </div>
           <div class="top-actions">
+            <span class="auto-refresh-note">每 15 秒自动刷新</span>
             <button id="refresh-button" class="button ghost" type="button">刷新</button>
             <div class="export-menu">
               <button id="export-toggle" class="button ghost" type="button">导出 ▾</button>
@@ -78,34 +79,34 @@
         </header>
 
         <section class="summary-grid" aria-label="订阅统计">
-          <article class="summary-card">
+          <button class="summary-card active" data-summary-filter="all" type="button" aria-pressed="true">
             <span class="summary-icon violet">◎</span>
             <div>
-              <span>订阅关系</span>
+              <span id="stat-total-label">订阅关系</span>
               <strong id="stat-total">0</strong>
             </div>
-          </article>
-          <article class="summary-card">
+          </button>
+          <button class="summary-card" data-summary-filter="live" type="button" aria-pressed="false">
             <span class="summary-icon green">●</span>
             <div>
               <span>正在直播</span>
               <strong id="stat-live">0</strong>
             </div>
-          </article>
-          <article class="summary-card">
+          </button>
+          <button class="summary-card" data-summary-filter="enabled" type="button" aria-pressed="false">
             <span class="summary-icon blue">⌁</span>
             <div>
               <span>直播通知已开</span>
               <strong id="stat-enabled">0</strong>
             </div>
-          </article>
-          <article class="summary-card">
+          </button>
+          <button class="summary-card" data-summary-filter="online-bots" type="button" aria-pressed="false">
             <span class="summary-icon amber">⌘</span>
             <div>
               <span>在线机器人</span>
               <strong id="stat-bots">0</strong>
             </div>
-          </article>
+          </button>
         </section>
 
         <section class="panel">
@@ -114,17 +115,23 @@
               <span aria-hidden="true">⌕</span>
               <input id="search-input" type="search" placeholder="搜索主播、UID、直播间、群号或机器人…" />
             </label>
-            <select id="type-filter" aria-label="通知类型">
-              <option value="">全部通知类型</option>
-              <option value="group">QQ群</option>
-              <option value="private">私聊</option>
-              <option value="guild">频道</option>
+          </div>
+          <div id="bulk-toolbar" class="bulk-toolbar hidden">
+            <strong id="selected-count">已选择 0 条</strong>
+            <select id="bulk-action" aria-label="批量操作">
+              <option value="">选择批量操作</option>
+              <option value="live_on">开启直播通知</option>
+              <option value="live_off">关闭直播通知</option>
+              <option value="dynamic_on">开启动态通知</option>
+              <option value="dynamic_off">关闭动态通知</option>
+              <option value="at_on">开启 @全体</option>
+              <option value="at_off">关闭 @全体</option>
+              <option value="bot">更换推送机器人</option>
+              <option value="delete">删除订阅</option>
             </select>
-            <select id="live-filter" aria-label="直播通知状态">
-              <option value="">全部直播开关</option>
-              <option value="true">直播通知已开</option>
-              <option value="false">直播通知已关</option>
-            </select>
+            <input id="bulk-bot-input" class="hidden" type="number" min="1" list="bot-options" placeholder="机器人 QQ" />
+            <button id="bulk-apply" class="button primary" type="button">应用</button>
+            <button id="bulk-clear" class="button ghost" type="button">取消选择</button>
           </div>
 
           <div id="loading-state" class="state-message">正在加载订阅…</div>
@@ -138,10 +145,11 @@
             <table>
               <thead>
                 <tr>
-                  <th>主播 / 直播间</th>
-                  <th>直播状态</th>
-                  <th>通知目标</th>
-                  <th>推送机器人</th>
+                  <th class="select-column"><input id="select-page" type="checkbox" aria-label="选择当前页" /></th>
+                  <th><button class="sort-button" data-sort="name" type="button">主播 / 直播间</button></th>
+                  <th><button class="sort-button" data-sort="live_status" type="button">直播状态</button></th>
+                  <th><button class="sort-button" data-sort="target_type" type="button">通知目标</button></th>
+                  <th><button class="sort-button" data-sort="bot_id" type="button">推送机器人</button></th>
                   <th>功能开关</th>
                   <th class="align-right">操作</th>
                 </tr>
@@ -150,6 +158,24 @@
             </table>
           </div>
           <div id="mobile-list" class="mobile-list hidden"></div>
+          <div id="pagination" class="pagination hidden" aria-label="列表分页">
+            <label class="page-size-control">
+              <span>每页</span>
+              <select id="page-size-input" aria-label="每页条数">
+                <option value="10" selected>10 条</option>
+                <option value="20">20 条</option>
+                <option value="50">50 条</option>
+                <option value="100">100 条</option>
+              </select>
+            </label>
+            <span id="page-info" class="page-info"></span>
+            <div class="page-actions">
+              <button id="page-first" class="row-button" type="button">首页</button>
+              <button id="page-prev" class="row-button" type="button">上一页</button>
+              <button id="page-next" class="row-button" type="button">下一页</button>
+              <button id="page-last" class="row-button" type="button">末页</button>
+            </div>
+          </div>
         </section>
       </main>
     </div>
@@ -166,16 +192,19 @@
         <form id="subscription-form" class="modal-body">
           <input id="subscription-id" type="hidden" />
 
-          <label id="room-field">
-            <span>B站直播间</span>
-            <input
-              id="room-input"
-              type="text"
-              placeholder="短号、真实房间号或直播间链接"
-              maxlength="200"
-            />
-            <small>系统会自动解析真实房间号、主播 UID 和名称。</small>
-          </label>
+          <div id="source-field" class="field-grid">
+            <label>
+              <span>主播输入类型</span>
+              <select id="source-type-input">
+                <option value="uid">用户 UID</option>
+                <option value="room">直播间号</option>
+              </select>
+            </label>
+            <label>
+              <span id="source-value-label">用户 UID</span>
+              <input id="source-value-input" type="number" min="1" inputmode="numeric" placeholder="请输入 B站用户 UID" />
+            </label>
+          </div>
 
           <div id="editing-streamer" class="streamer-preview hidden">
             <span id="editing-avatar" class="avatar">H</span>
@@ -187,14 +216,32 @@
 
           <div class="field-grid">
             <label>
+              <span>通知目标类型</span>
+              <select id="target-type-input">
+                <option value="group">QQ群</option>
+                <option value="private">私聊</option>
+                <option value="guild">频道</option>
+              </select>
+            </label>
+            <label>
               <span>推送机器人 QQ</span>
               <input id="bot-input" type="number" min="1" list="bot-options" placeholder="选择或手动输入" required />
               <datalist id="bot-options"></datalist>
             </label>
+          </div>
+          <label id="target-id-field">
+            <span id="target-id-label">通知群号</span>
+            <input id="target-id-input" type="number" min="1" list="group-options" placeholder="选择或手动输入" />
+            <datalist id="group-options"></datalist>
+          </label>
+          <div id="guild-target-fields" class="field-grid hidden">
             <label>
-              <span>通知群号</span>
-              <input id="group-input" type="number" min="1" list="group-options" placeholder="选择或手动输入" required />
-              <datalist id="group-options"></datalist>
+              <span>频道 ID</span>
+              <input id="guild-id-input" type="text" maxlength="100" placeholder="请输入频道 ID" />
+            </label>
+            <label>
+              <span>子频道 ID</span>
+              <input id="channel-id-input" type="text" maxlength="100" placeholder="请输入子频道 ID" />
             </label>
           </div>
           <p id="immutable-target-note" class="notice hidden">私聊和频道订阅只能修改机器人与功能开关，不能修改通知目标。</p>

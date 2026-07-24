@@ -112,6 +112,8 @@ async def dy_sched():
                     type_id=sets.type_id,
                     message=message,
                     at=bool(sets.at) and plugin_config.haruka_dynamic_at,
+                    subscription_id=sets.id,
+                    event_type="dynamic",
                 )
 
             offset[uid] = dynamic_id

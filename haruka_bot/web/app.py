@@ -5,12 +5,11 @@ import hashlib
 import hmac
 import io
 import json
-import re
 import secrets
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -27,7 +26,7 @@ from pydantic import BaseModel, Field
 from ..config import plugin_config
 from ..database import DB as db
 from ..database.models import Guild, User
-from ..utils import PROXIES
+from ..utils import PROXIES, safe_send
 
 WEB_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = WEB_ROOT / "static"
@@ -76,8 +75,12 @@ class LoginRequest(BaseModel):
 
 
 class SubscriptionCreate(BaseModel):
-    room: str = Field(..., min_length=1, max_length=200)
-    target_id: int = Field(..., gt=0)
+    uid: Optional[int] = Field(None, gt=0)
+    room_id: Optional[int] = Field(None, gt=0)
+    target_type: Literal["group", "private", "guild"] = "group"
+    target_id: Optional[int] = Field(None, gt=0)
+    guild_id: Optional[str] = Field(None, max_length=100)
+    channel_id: Optional[str] = Field(None, max_length=100)
     bot_id: int = Field(..., gt=0)
     live: bool = True
     dynamic: bool = False
@@ -135,11 +138,92 @@ class SubscriptionView(BaseModel):
     at: bool
     live_duration: int
     live_status: str
+    checked_at: Optional[int] = None
+    live_started_at: Optional[int] = None
+    live_title: str = ""
+    live_area: str = ""
+    current_live_duration: int = 0
+    last_push_at: Optional[int] = None
+    last_push_success: Optional[bool] = None
+    last_push_event: Optional[str] = None
+    last_push_error_code: Optional[str] = None
+    last_push_error: Optional[str] = None
 
 
 class SubscriptionListResponse(BaseModel):
     items: List[SubscriptionView]
     total: int
+    live_total: int
+    enabled_total: int
+    summary_total: int
+    summary_live_total: int
+    summary_enabled_total: int
+    page: int
+    page_size: int
+
+
+class StreamerView(BaseModel):
+    uid: int
+    name: str
+    avatar_url: str
+    room_id: int
+    live_status: str
+    checked_at: Optional[int] = None
+    live_started_at: Optional[int] = None
+    live_title: str = ""
+    live_area: str = ""
+    current_live_duration: int = 0
+    live_duration: int
+    subscription_count: int
+    subscriptions: List[SubscriptionView]
+
+
+class StreamerListResponse(BaseModel):
+    items: List[StreamerView]
+    total: int
+    live_total: int
+    enabled_total: int
+    page: int
+    page_size: int
+
+
+class SubscriptionBulkRequest(BaseModel):
+    ids: List[int] = Field(..., min_items=1, max_items=500)
+    operation: Literal["update", "delete"]
+    bot_id: Optional[int] = Field(None, gt=0)
+    live: Optional[bool] = None
+    dynamic: Optional[bool] = None
+    at: Optional[bool] = None
+
+
+class BulkResponse(BaseModel):
+    processed_ids: List[int]
+    missing_ids: List[int]
+    failed_ids: List[int]
+
+
+class PushTestResponse(BaseModel):
+    success: bool
+    attempted_at: int
+    code: Optional[str] = None
+    message: str
+
+
+class AuditItem(BaseModel):
+    id: int
+    created_at: int
+    actor: str
+    action: str
+    target_ids: List[int]
+    success: bool
+    summary: str
+
+
+class AuditListResponse(BaseModel):
+    items: List[AuditItem]
+    total: int
+    page: int
+    page_size: int
 
 
 class DeleteResponse(BaseModel):
@@ -454,12 +538,17 @@ async def _subscription_rows(force_options: bool = False) -> List[Dict[str, Any]
     users = {user.uid: user for user in await User.all()}
     guilds = {guild.id: guild for guild in await Guild.all()}
     live_duration_totals = await db.get_live_duration_totals()
+    delivery_states = await db.get_push_delivery_states()
     snapshot = await _get_bot_snapshot(force=force_options)
 
     try:
-        from ..plugins.pusher.live_pusher import status as live_status_map
+        from ..plugins.pusher.live_pusher import (
+            live_snapshot,
+            status as live_status_map,
+        )
     except ImportError:
         live_status_map = {}
+        live_snapshot = {}
 
     rows: List[Dict[str, Any]] = []
     for sub in subs:
@@ -477,10 +566,18 @@ async def _subscription_rows(force_options: bool = False) -> List[Dict[str, Any]
                 channel_id = guild.channel_id
                 target_name = f"{guild.guild_id} / {guild.channel_id}"
 
-        current_status = live_status_map.get(sub.uid)
+        live_data = live_snapshot.get(str(sub.uid)) or live_snapshot.get(sub.uid) or {}
+        current_status = live_data.get("status")
+        if current_status is None:
+            current_status = live_status_map.get(str(sub.uid))
+        if current_status is None:
+            current_status = live_status_map.get(sub.uid)
         live_status = "unknown"
         if current_status is not None:
             live_status = "live" if current_status else "offline"
+        checked_at = live_data.get("checked_at")
+        live_started_at = live_data.get("live_started_at") or None
+        delivery = delivery_states.get(sub.id)
 
         rows.append(
             {
@@ -502,6 +599,20 @@ async def _subscription_rows(force_options: bool = False) -> List[Dict[str, Any]
                 "at": bool(sub.at),
                 "live_duration": live_duration_totals.get(sub.uid, 0),
                 "live_status": live_status,
+                "checked_at": checked_at,
+                "live_started_at": live_started_at,
+                "live_title": str(live_data.get("title") or ""),
+                "live_area": str(live_data.get("area") or ""),
+                "current_live_duration": (
+                    max(0, int(time.time()) - int(live_started_at))
+                    if live_status == "live" and live_started_at
+                    else 0
+                ),
+                "last_push_at": delivery.attempted_at if delivery else None,
+                "last_push_success": bool(delivery.success) if delivery else None,
+                "last_push_event": delivery.event_type if delivery else None,
+                "last_push_error_code": delivery.error_code if delivery else None,
+                "last_push_error": delivery.error_message if delivery else None,
             }
         )
     return rows
@@ -510,20 +621,6 @@ async def _subscription_rows(force_options: bool = False) -> List[Dict[str, Any]
 async def _subscription_row(sub_id: int) -> Optional[Dict[str, Any]]:
     rows = await _subscription_rows()
     return next((row for row in rows if row["id"] == sub_id), None)
-
-
-def _extract_room_id(value: str) -> int:
-    value = value.strip()
-    if value.isdigit():
-        return int(value)
-    match = re.search(
-        r"(?:https?://)?live\.bilibili\.com/(?:blanc/)?(\d+)",
-        value,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        raise RoomResolveError(422, "请输入直播间短号、真实房间号或直播间链接")
-    return int(match.group(1))
 
 
 async def _resolve_room_details(input_room_id: int) -> Dict[str, Any]:
@@ -546,8 +643,7 @@ async def _resolve_room_details(input_room_id: int) -> Dict[str, Any]:
     }
 
 
-async def _resolve_room(value: str) -> Dict[str, Any]:
-    input_room_id = _extract_room_id(value)
+async def _resolve_room(input_room_id: int) -> Dict[str, Any]:
     try:
         return await asyncio.wait_for(
             _resolve_room_details(input_room_id),
@@ -568,6 +664,53 @@ async def _resolve_room(value: str) -> Dict[str, Any]:
         raise RoomResolveError(502, "B站接口返回异常，请稍后再试")
     except Exception as e:
         logger.warning(f"WebUI 解析直播间 {input_room_id} 失败：{e}")
+        raise RoomResolveError(502, "无法连接 B站接口，请稍后再试")
+
+
+async def _resolve_uid_details(uid: int) -> Dict[str, Any]:
+    user_info = await get_user_info(uid, reqtype="web", proxies=PROXIES)
+    card = user_info.get("card") or {}
+    name = str(card.get("name") or "")
+    if not name:
+        raise RoomResolveError(422, "用户 UID 不存在")
+
+    live_room = card.get("live_room") or {}
+    room_id = int(live_room.get("roomid") or 0)
+    if not room_id:
+        room = await get(
+            "https://api.live.bilibili.com/live_user/v1/Master/info",
+            params={"uid": uid},
+        )
+        room_id = int((room or {}).get("room_id") or 0)
+    return {
+        "uid": uid,
+        "name": name,
+        "room_id": room_id,
+        "short_id": 0,
+    }
+
+
+async def _resolve_uid(uid: int) -> Dict[str, Any]:
+    try:
+        return await asyncio.wait_for(
+            _resolve_uid_details(uid),
+            timeout=ROOM_RESOLVE_TIMEOUT_SECONDS,
+        )
+    except RoomResolveError:
+        raise
+    except asyncio.TimeoutError:
+        logger.warning(f"WebUI 解析用户 UID {uid} 超时")
+        raise RoomResolveError(502, "B站接口响应超时，请稍后再试")
+    except ResponseCodeError as e:
+        code = getattr(e, "code", None)
+        if code in (-400, -404):
+            raise RoomResolveError(422, "用户 UID 不存在")
+        if code == -412:
+            raise RoomResolveError(429, "B站接口触发风控，请稍后再试")
+        logger.warning(f"WebUI 解析用户 UID {uid} 失败：{e}")
+        raise RoomResolveError(502, "B站接口返回异常，请稍后再试")
+    except Exception as e:
+        logger.warning(f"WebUI 解析用户 UID {uid} 失败：{e}")
         raise RoomResolveError(502, "无法连接 B站接口，请稍后再试")
 
 
@@ -628,14 +771,19 @@ async def logout(_session: Dict[str, Any] = Depends(require_csrf)):
     return response
 
 
-@router.get("/api/subscriptions", response_model=SubscriptionListResponse)
-async def list_subscriptions(
-    q: str = Query("", max_length=100),
-    target_type: Optional[str] = Query(None),
-    live_enabled: Optional[bool] = Query(None),
-    _session: Dict[str, Any] = Depends(require_auth),
-):
-    rows = await _subscription_rows()
+def _filter_subscription_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    q: str = "",
+    target_type: Optional[str] = None,
+    live_enabled: Optional[bool] = None,
+    live_status: Optional[str] = None,
+    uid: Optional[int] = None,
+    room_id: Optional[int] = None,
+    target_id: Optional[int] = None,
+    bot_id: Optional[int] = None,
+    bot_online: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
     query = q.strip().casefold()
     if query:
         searchable = (
@@ -654,11 +802,197 @@ async def list_subscriptions(
             for row in rows
             if any(query in str(row.get(field) or "").casefold() for field in searchable)
         ]
-    if target_type:
-        rows = [row for row in rows if row["target_type"] == target_type]
+    exact_filters = {
+        "target_type": target_type,
+        "live_status": live_status,
+        "uid": uid,
+        "room_id": room_id,
+        "target_id": target_id,
+        "bot_id": bot_id,
+    }
+    for field, value in exact_filters.items():
+        if value is not None:
+            rows = [row for row in rows if row.get(field) == value]
     if live_enabled is not None:
         rows = [row for row in rows if row["live"] is live_enabled]
-    return {"items": rows, "total": len(rows)}
+    if bot_online is not None:
+        rows = [row for row in rows if row["bot_online"] is bot_online]
+    return rows
+
+
+def _sort_subscription_rows(
+    rows: List[Dict[str, Any]],
+    sort_by: str,
+    sort_order: str,
+) -> List[Dict[str, Any]]:
+    status_rank = {"live": 0, "offline": 1, "unknown": 2}
+
+    def primary(row: Dict[str, Any]):
+        if sort_by == "live_status":
+            return status_rank.get(row["live_status"], 3)
+        if sort_by == "name":
+            return (row["name"] or "").casefold()
+        if sort_by in ("target_type",):
+            return str(row.get(sort_by) or "")
+        return int(row.get(sort_by) or 0)
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            primary(row),
+            (row["name"] or "").casefold(),
+            row["uid"],
+            row["id"],
+        ),
+        reverse=sort_order == "desc",
+    )
+
+
+@router.get("/api/subscriptions", response_model=SubscriptionListResponse)
+async def list_subscriptions(
+    q: str = Query("", max_length=100),
+    target_type: Optional[str] = Query(None),
+    live_enabled: Optional[bool] = Query(None),
+    live_status: Optional[str] = Query(
+        None,
+        regex="^(live|offline|unknown)$",
+    ),
+    uid: Optional[int] = Query(None, gt=0),
+    room_id: Optional[int] = Query(None, gt=0),
+    target_id: Optional[int] = Query(None, gt=0),
+    bot_id: Optional[int] = Query(None, gt=0),
+    bot_online: Optional[bool] = Query(None),
+    sort_by: Literal[
+        "live_status",
+        "name",
+        "uid",
+        "live_duration",
+        "checked_at",
+        "target_type",
+        "target_id",
+        "bot_id",
+    ] = Query("live_status"),
+    sort_order: Literal["asc", "desc"] = Query("asc"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1),
+    _session: Dict[str, Any] = Depends(require_auth),
+):
+    if page_size not in (10, 20, 50, 100):
+        raise HTTPException(status_code=422, detail="每页条数仅支持 10、20、50、100")
+    all_rows = await _subscription_rows()
+    rows = _filter_subscription_rows(
+        all_rows,
+        q=q,
+        target_type=target_type,
+        live_enabled=live_enabled,
+        live_status=live_status,
+        uid=uid,
+        room_id=room_id,
+        target_id=target_id,
+        bot_id=bot_id,
+        bot_online=bot_online,
+    )
+    rows = _sort_subscription_rows(rows, sort_by, sort_order)
+    total = len(rows)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    start = (page - 1) * page_size
+    return {
+        "items": rows[start : start + page_size],
+        "total": total,
+        "live_total": sum(row["live_status"] == "live" for row in rows),
+        "enabled_total": sum(bool(row["live"]) for row in rows),
+        "summary_total": len(all_rows),
+        "summary_live_total": sum(
+            row["live_status"] == "live" for row in all_rows
+        ),
+        "summary_enabled_total": sum(bool(row["live"]) for row in all_rows),
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.get("/api/streamers", response_model=StreamerListResponse)
+async def list_streamers(
+    q: str = Query("", max_length=100),
+    target_type: Optional[str] = Query(None),
+    live_enabled: Optional[bool] = Query(None),
+    live_status: Optional[str] = Query(
+        None,
+        regex="^(live|offline|unknown)$",
+    ),
+    uid: Optional[int] = Query(None, gt=0),
+    room_id: Optional[int] = Query(None, gt=0),
+    target_id: Optional[int] = Query(None, gt=0),
+    bot_id: Optional[int] = Query(None, gt=0),
+    sort_by: Literal[
+        "live_status",
+        "name",
+        "uid",
+        "live_duration",
+        "checked_at",
+        "target_type",
+        "target_id",
+        "bot_id",
+    ] = Query("live_status"),
+    sort_order: Literal["asc", "desc"] = Query("asc"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1),
+    _session: Dict[str, Any] = Depends(require_auth),
+):
+    if page_size not in (10, 20, 50, 100):
+        raise HTTPException(status_code=422, detail="每页条数仅支持 10、20、50、100")
+    rows = _filter_subscription_rows(
+        await _subscription_rows(),
+        q=q,
+        target_type=target_type,
+        live_enabled=live_enabled,
+        live_status=live_status,
+        uid=uid,
+        room_id=room_id,
+        target_id=target_id,
+        bot_id=bot_id,
+    )
+    rows = _sort_subscription_rows(rows, sort_by, sort_order)
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(row["uid"], []).append(row)
+
+    streamers = []
+    for subscriptions in grouped.values():
+        first = subscriptions[0]
+        streamers.append(
+            {
+                "uid": first["uid"],
+                "name": first["name"],
+                "avatar_url": first["avatar_url"],
+                "room_id": first["room_id"],
+                "live_status": first["live_status"],
+                "checked_at": first["checked_at"],
+                "live_started_at": first["live_started_at"],
+                "live_title": first["live_title"],
+                "live_area": first["live_area"],
+                "current_live_duration": first["current_live_duration"],
+                "live_duration": first["live_duration"],
+                "subscription_count": len(subscriptions),
+                "subscriptions": subscriptions,
+            }
+        )
+    total = len(streamers)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    start = (page - 1) * page_size
+    return {
+        "items": streamers[start : start + page_size],
+        "total": total,
+        "live_total": sum(item["live_status"] == "live" for item in streamers),
+        "enabled_total": sum(
+            any(subscription["live"] for subscription in item["subscriptions"])
+            for item in streamers
+        ),
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/api/users/{uid}/avatar")
@@ -704,30 +1038,68 @@ async def create_subscription(
     payload: SubscriptionCreate,
     _session: Dict[str, Any] = Depends(require_csrf),
 ):
+    if (payload.uid is None) == (payload.room_id is None):
+        raise HTTPException(status_code=422, detail="请选择用户 UID 或直播间号")
+
+    target_id = payload.target_id
+    guild_id = (payload.guild_id or "").strip()
+    channel_id = (payload.channel_id or "").strip()
+    if payload.target_type in ("group", "private") and target_id is None:
+        raise HTTPException(status_code=422, detail="请输入有效的通知目标 ID")
+    if payload.target_type == "guild" and (not guild_id or not channel_id):
+        raise HTTPException(status_code=422, detail="请输入频道 ID 和子频道 ID")
+
     try:
-        room = await _resolve_room(payload.room)
+        room = (
+            await _resolve_uid(payload.uid)
+            if payload.uid is not None
+            else await _resolve_room(payload.room_id)
+        )
     except RoomResolveError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
+    if payload.target_type == "guild":
+        await db.add_guild(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            admin=True,
+        )
+        guild = await db.get_guild(guild_id=guild_id, channel_id=channel_id)
+        if guild is None:
+            raise HTTPException(status_code=500, detail="保存频道信息失败")
+        target_id = guild.id
+
+    assert target_id is not None
     created = await db.add_sub(
         uid=room["uid"],
-        type="group",
-        type_id=payload.target_id,
+        type=payload.target_type,
+        type_id=target_id,
         bot_id=payload.bot_id,
         name=room["name"],
         room_id=room["room_id"],
         live=payload.live,
         dynamic=payload.dynamic,
-        at=payload.at,
+        at=payload.at if payload.target_type != "private" else False,
     )
     if not created:
         raise HTTPException(
             status_code=409,
             detail="该主播已在此通知目标中订阅，请编辑现有记录",
         )
-    sub = await db.get_sub(uid=room["uid"], type="group", type_id=payload.target_id)
+    sub = await db.get_sub(
+        uid=room["uid"],
+        type=payload.target_type,
+        type_id=target_id,
+    )
     _bot_cache["expires"] = 0
-    return await _subscription_row(sub.id)
+    row = await _subscription_row(sub.id)
+    await db.add_web_audit(
+        action="create",
+        target_ids=[sub.id],
+        success=True,
+        summary=f"新增主播 {room['uid']} 的{payload.target_type}订阅",
+    )
+    return row
 
 
 @router.patch(
@@ -745,6 +1117,8 @@ async def update_subscription(
     updates = payload.dict(exclude_unset=True)
     if sub.type != "group" and "target_id" in updates:
         raise HTTPException(status_code=400, detail="私聊和频道订阅不能修改通知目标")
+    if sub.type == "private" and updates.get("at"):
+        updates["at"] = False
     if "target_id" in updates:
         updates["type_id"] = updates.pop("target_id")
     result = await db.update_sub_by_id(sub_id, **updates)
@@ -753,7 +1127,14 @@ async def update_subscription(
     if result is None:
         raise HTTPException(status_code=404, detail="订阅不存在")
     _bot_cache["expires"] = 0
-    return await _subscription_row(sub_id)
+    row = await _subscription_row(sub_id)
+    await db.add_web_audit(
+        action="update",
+        target_ids=[sub_id],
+        success=True,
+        summary=f"更新订阅字段：{', '.join(sorted(updates)) or '无'}",
+    )
+    return row
 
 
 @router.delete(
@@ -764,10 +1145,162 @@ async def delete_subscription(
     sub_id: int,
     _session: Dict[str, Any] = Depends(require_csrf),
 ):
+    sub = await db.get_sub_by_id(sub_id)
     if not await db.delete_sub_by_id(sub_id):
         raise HTTPException(status_code=404, detail="订阅不存在")
     _bot_cache["expires"] = 0
+    await db.add_web_audit(
+        action="delete",
+        target_ids=[sub_id],
+        success=True,
+        summary=f"删除主播 {sub.uid if sub else '未知'} 的订阅",
+    )
     return {"deleted": True, "id": sub_id}
+
+
+@router.post("/api/subscriptions/bulk", response_model=BulkResponse)
+async def bulk_subscriptions(
+    payload: SubscriptionBulkRequest,
+    _session: Dict[str, Any] = Depends(require_csrf),
+):
+    ids = list(dict.fromkeys(payload.ids))
+    processed_ids: List[int] = []
+    missing_ids: List[int] = []
+    failed_ids: List[int] = []
+    updates = payload.dict(
+        exclude={"ids", "operation"},
+        exclude_unset=True,
+    )
+    updates = {key: value for key, value in updates.items() if value is not None}
+    if payload.operation == "update" and not updates:
+        raise HTTPException(status_code=422, detail="请至少选择一个批量修改字段")
+
+    for sub_id in ids:
+        sub = await db.get_sub_by_id(sub_id)
+        if sub is None:
+            missing_ids.append(sub_id)
+            continue
+        try:
+            if payload.operation == "delete":
+                succeeded = await db.delete_sub_by_id(sub_id)
+            else:
+                sub_updates = dict(updates)
+                if sub.type == "private" and sub_updates.get("at"):
+                    sub_updates["at"] = False
+                succeeded = await db.update_sub_by_id(sub_id, **sub_updates)
+            if succeeded:
+                processed_ids.append(sub_id)
+            else:
+                failed_ids.append(sub_id)
+        except Exception as e:
+            logger.warning(f"WebUI 批量操作订阅 {sub_id} 失败：{e}")
+            failed_ids.append(sub_id)
+
+    _bot_cache["expires"] = 0
+    await db.add_web_audit(
+        action=f"bulk_{payload.operation}",
+        target_ids=ids,
+        success=not failed_ids,
+        summary=(
+            f"成功 {len(processed_ids)}，缺失 {len(missing_ids)}，"
+            f"失败 {len(failed_ids)}"
+        ),
+    )
+    return {
+        "processed_ids": processed_ids,
+        "missing_ids": missing_ids,
+        "failed_ids": failed_ids,
+    }
+
+
+@router.post(
+    "/api/subscriptions/{sub_id}/test-push",
+    response_model=PushTestResponse,
+)
+async def test_subscription_push(
+    sub_id: int,
+    _session: Dict[str, Any] = Depends(require_csrf),
+):
+    sub = await db.get_sub_by_id(sub_id)
+    if sub is None:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+    row = await _subscription_row(sub_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+    attempted_at = int(time.time())
+    message = (
+        "[HarukaBot 管理页面测试]\n"
+        f"主播：{row['name'] or row['uid']}（UID {row['uid']}）\n"
+        f"通知目标：{row['target_type']} {row['target_name'] or row['target_id']}\n"
+        f"测试时间：{datetime.now().astimezone():%Y-%m-%d %H:%M:%S}"
+    )
+    result = await safe_send(
+        bot_id=sub.bot_id,
+        send_type=sub.type,
+        type_id=sub.type_id,
+        message=message,
+        at=False,
+        allow_fallback=False,
+        cleanup_invalid_target=False,
+        subscription_id=sub.id,
+        event_type="test",
+    )
+    await db.add_web_audit(
+        action="test_push",
+        target_ids=[sub_id],
+        success=result.success,
+        summary=result.message,
+    )
+    return {
+        "success": result.success,
+        "attempted_at": attempted_at,
+        "code": result.code,
+        "message": result.message,
+    }
+
+
+@router.get("/api/audit", response_model=AuditListResponse)
+async def list_audit(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1),
+    _session: Dict[str, Any] = Depends(require_auth),
+):
+    if page_size not in (20, 50, 100):
+        raise HTTPException(status_code=422, detail="每页条数仅支持 20、50、100")
+    items, total = await db.get_web_audits(
+        offset=(page - 1) * page_size,
+        limit=page_size,
+    )
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    if page > total_pages:
+        page = total_pages
+        items, total = await db.get_web_audits(
+            offset=(page - 1) * page_size,
+            limit=page_size,
+        )
+    result = []
+    for item in items:
+        try:
+            target_ids = json.loads(item.target_ids)
+        except (TypeError, json.JSONDecodeError):
+            target_ids = []
+        result.append(
+            {
+                "id": item.id,
+                "created_at": item.created_at,
+                "actor": item.actor,
+                "action": item.action,
+                "target_ids": target_ids,
+                "success": bool(item.success),
+                "summary": item.summary,
+            }
+        )
+    return {
+        "items": result,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 def _export_filename(extension: str) -> str:

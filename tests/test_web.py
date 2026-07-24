@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from haruka_bot.config import plugin_config
 from haruka_bot.database import DB as db
+from haruka_bot.utils import SendResult, safe_send
 from haruka_bot.web.app import (
     CSRF_COOKIE,
     LOGIN_MAX_TRACKED_IPS,
@@ -22,13 +23,13 @@ from haruka_bot.web.app import (
     _avatar_cache,
     _bot_cache,
     _create_session,
-    _extract_room_id,
     _get_avatar_data,
     _login_failures,
     _normalize_avatar_url,
     _prune_login_failures,
     _read_session,
     _resolve_room,
+    _resolve_uid,
     setup_web,
 )
 
@@ -63,16 +64,6 @@ class WebSecurityTests(unittest.TestCase):
         with patch("haruka_bot.web.app.time.time", return_value=future):
             self.assertIsNone(_read_session(session["token"]))
 
-    def test_room_id_parser(self):
-        self.assertEqual(_extract_room_id("12345"), 12345)
-        self.assertEqual(
-            _extract_room_id("https://live.bilibili.com/67890?broadcast_type=0"),
-            67890,
-        )
-        self.assertEqual(_extract_room_id("live.bilibili.com/blanc/24680"), 24680)
-        with self.assertRaises(RoomResolveError):
-            _extract_room_id("https://www.bilibili.com/video/BV1invalid")
-
     def test_login_and_csrf_protection(self):
         with TestClient(nonebot.get_app()) as client:
             redirect = client.get("/admin", follow_redirects=False)
@@ -88,6 +79,28 @@ class WebSecurityTests(unittest.TestCase):
             static = client.get("/admin/static/app.js")
             self.assertEqual(static.status_code, 200)
             self.assertEqual(static.headers["X-Content-Type-Options"], "nosniff")
+            self.assertIn("AUTO_REFRESH_INTERVAL_MS", static.text)
+            self.assertIn("live_status", static.text)
+            self.assertIn("target_type", static.text)
+
+            page = index.text
+            self.assertNotIn('id="status-filter"', page)
+            self.assertIn('id="source-type-input"', page)
+            self.assertIn('<option value="uid">用户 UID</option>', page)
+            self.assertIn('<option value="room">直播间号</option>', page)
+            self.assertIn('id="source-value-input"', page)
+            self.assertNotIn('class="source-tabs"', page)
+            self.assertIn('id="page-size-input"', page)
+            self.assertIn('id="bulk-toolbar"', page)
+            self.assertNotIn('id="audit-drawer"', page)
+            self.assertNotIn('data-view="streamers"', page)
+            self.assertIn('data-summary-filter="all"', page)
+            self.assertIn('data-summary-filter="live"', page)
+            self.assertIn('data-summary-filter="enabled"', page)
+            self.assertIn('data-summary-filter="online-bots"', page)
+            self.assertIn('value="100"', page)
+            self.assertIn('value="private"', page)
+            self.assertIn('value="guild"', page)
 
             self.assertEqual(client.get("/haruka/").status_code, 404)
             self.assertEqual(
@@ -141,12 +154,15 @@ class WebSecurityTests(unittest.TestCase):
             with patch(
                 "haruka_bot.web.app._resolve_room",
                 new=AsyncMock(return_value=room),
+            ), patch(
+                "haruka_bot.web.app._resolve_uid",
+                new=AsyncMock(return_value=room),
             ):
                 created = client.post(
                     "/admin/api/subscriptions",
                     headers=headers,
                     json={
-                        "room": "4001",
+                        "room_id": 4001,
                         "target_id": 2001,
                         "bot_id": 3001,
                         "live": True,
@@ -161,12 +177,58 @@ class WebSecurityTests(unittest.TestCase):
                     "/admin/api/subscriptions",
                     headers=headers,
                     json={
-                        "room": "4001",
+                        "room_id": 4001,
                         "target_id": 2001,
                         "bot_id": 9999,
                     },
                 )
                 self.assertEqual(duplicate.status_code, 409)
+
+                private_created = client.post(
+                    "/admin/api/subscriptions",
+                    headers=headers,
+                    json={
+                        "uid": 1001,
+                        "target_type": "private",
+                        "target_id": 5001,
+                        "bot_id": 3001,
+                        "at": True,
+                    },
+                )
+                self.assertEqual(private_created.status_code, 201)
+                self.assertEqual(private_created.json()["target_type"], "private")
+                self.assertEqual(private_created.json()["target_id"], 5001)
+                self.assertFalse(private_created.json()["at"])
+                private_sub_id = private_created.json()["id"]
+
+                guild_created = client.post(
+                    "/admin/api/subscriptions",
+                    headers=headers,
+                    json={
+                        "room_id": 4001,
+                        "target_type": "guild",
+                        "guild_id": "guild-a",
+                        "channel_id": "channel-b",
+                        "bot_id": 3001,
+                    },
+                )
+                self.assertEqual(guild_created.status_code, 201)
+                self.assertEqual(guild_created.json()["target_type"], "guild")
+                self.assertEqual(guild_created.json()["guild_id"], "guild-a")
+                self.assertEqual(guild_created.json()["channel_id"], "channel-b")
+                guild_sub_id = guild_created.json()["id"]
+
+                ambiguous_source = client.post(
+                    "/admin/api/subscriptions",
+                    headers=headers,
+                    json={
+                        "uid": 1001,
+                        "room_id": 4001,
+                        "target_id": 2003,
+                        "bot_id": 3001,
+                    },
+                )
+                self.assertEqual(ambiguous_source.status_code, 422)
 
             updated = client.patch(
                 f"/admin/api/subscriptions/{sub_id}",
@@ -184,16 +246,41 @@ class WebSecurityTests(unittest.TestCase):
             self.assertFalse(updated.json()["live"])
             self.assertTrue(updated.json()["dynamic"])
 
-            listing = client.get(
-                "/admin/api/subscriptions",
-                params={
-                    "q": "网页",
-                    "target_type": "group",
-                    "live_enabled": "false",
+            with patch.dict(
+                "haruka_bot.plugins.pusher.live_pusher.status",
+                {"1001": 1},
+                clear=True,
+            ), patch.dict(
+                "haruka_bot.plugins.pusher.live_pusher.live_snapshot",
+                {
+                    "1001": {
+                        "status": 1,
+                        "checked_at": 123456,
+                        "live_started_at": 123400,
+                        "title": "测试直播标题",
+                        "area": "游戏 / 单机",
+                    }
                 },
-            )
+                clear=True,
+            ):
+                listing = client.get(
+                    "/admin/api/subscriptions",
+                    params={
+                        "q": "网页",
+                        "target_type": "group",
+                        "live_enabled": "false",
+                        "live_status": "live",
+                    },
+                )
             self.assertEqual(listing.status_code, 200)
             self.assertEqual(listing.json()["total"], 1)
+            self.assertEqual(listing.json()["page"], 1)
+            self.assertEqual(listing.json()["page_size"], 10)
+            self.assertEqual(listing.json()["live_total"], 1)
+            self.assertEqual(listing.json()["enabled_total"], 0)
+            self.assertEqual(listing.json()["items"][0]["live_status"], "live")
+            self.assertEqual(listing.json()["items"][0]["checked_at"], 123456)
+            self.assertEqual(listing.json()["items"][0]["live_title"], "测试直播标题")
             self.assertEqual(
                 listing.json()["items"][0]["avatar_url"],
                 "/admin/api/users/1001/avatar",
@@ -207,6 +294,54 @@ class WebSecurityTests(unittest.TestCase):
             self.assertEqual(avatar.status_code, 200)
             self.assertEqual(avatar.headers["content-type"], "image/png")
             self.assertIn("max-age=3600", avatar.headers["cache-control"])
+
+            bulk = client.post(
+                "/admin/api/subscriptions/bulk",
+                headers=headers,
+                json={
+                    "ids": [private_sub_id, 999999],
+                    "operation": "update",
+                    "live": False,
+                    "at": True,
+                },
+            )
+            self.assertEqual(bulk.status_code, 200)
+            self.assertEqual(bulk.json()["processed_ids"], [private_sub_id])
+            self.assertEqual(bulk.json()["missing_ids"], [999999])
+            private_after_bulk = client.get(
+                "/admin/api/subscriptions",
+                params={"target_type": "private", "target_id": 5001},
+            ).json()["items"][0]
+            self.assertFalse(private_after_bulk["live"])
+            self.assertFalse(private_after_bulk["at"])
+
+            push_result = SendResult(
+                success=False,
+                code="bot_offline",
+                message="配置机器人未连接",
+                bot_id=3001,
+            )
+            with patch(
+                "haruka_bot.web.app.safe_send",
+                new=AsyncMock(return_value=push_result),
+            ) as send:
+                test_push = client.post(
+                    f"/admin/api/subscriptions/{private_sub_id}/test-push",
+                    headers=headers,
+                )
+            self.assertEqual(test_push.status_code, 200)
+            self.assertFalse(test_push.json()["success"])
+            self.assertEqual(test_push.json()["code"], "bot_offline")
+            self.assertFalse(send.await_args.kwargs["allow_fallback"])
+            self.assertFalse(send.await_args.kwargs["cleanup_invalid_target"])
+
+            audit = client.get("/admin/api/audit")
+            self.assertEqual(audit.status_code, 200)
+            self.assertGreaterEqual(audit.json()["total"], 1)
+            self.assertIn(
+                "test_push",
+                {item["action"] for item in audit.json()["items"]},
+            )
 
             options = client.get("/admin/api/options")
             self.assertEqual(options.status_code, 200)
@@ -230,6 +365,69 @@ class WebSecurityTests(unittest.TestCase):
             self.assertEqual(degraded_bot["groups"], [])
 
             group_row = updated.json()
+            paginated_rows = [
+                {
+                    **group_row,
+                    "id": group_row["id"] + index,
+                    "uid": group_row["uid"] + index // 2,
+                    "checked_at": 1000 + index,
+                    "bot_online": index % 2 == 0,
+                }
+                for index in range(25)
+            ]
+            with patch(
+                "haruka_bot.web.app._subscription_rows",
+                new=AsyncMock(return_value=paginated_rows),
+            ):
+                second_page = client.get(
+                    "/admin/api/subscriptions",
+                    params={"page": 2, "page_size": 10},
+                )
+                last_page = client.get(
+                    "/admin/api/subscriptions",
+                    params={"page": 99, "page_size": 10},
+                )
+                invalid_page_size = client.get(
+                    "/admin/api/subscriptions",
+                    params={"page_size": 25},
+                )
+                exact_uid = client.get(
+                    "/admin/api/subscriptions",
+                    params={"uid": group_row["uid"] + 3},
+                )
+                sorted_rows = client.get(
+                    "/admin/api/subscriptions",
+                    params={"sort_by": "uid", "sort_order": "desc"},
+                )
+                online_bot_rows = client.get(
+                    "/admin/api/subscriptions",
+                    params={"bot_online": "true"},
+                )
+                streamer_page = client.get(
+                    "/admin/api/streamers",
+                    params={"page": 1, "page_size": 10},
+                )
+            self.assertEqual(second_page.status_code, 200, second_page.text)
+            self.assertEqual(second_page.json()["total"], 25)
+            self.assertEqual(second_page.json()["page"], 2)
+            self.assertEqual(len(second_page.json()["items"]), 10)
+            self.assertEqual(last_page.json()["page"], 3)
+            self.assertEqual(len(last_page.json()["items"]), 5)
+            self.assertEqual(invalid_page_size.status_code, 422)
+            self.assertEqual(exact_uid.json()["total"], 2)
+            self.assertEqual(
+                sorted_rows.json()["items"][0]["uid"],
+                group_row["uid"] + 12,
+            )
+            self.assertEqual(online_bot_rows.json()["total"], 13)
+            self.assertEqual(online_bot_rows.json()["summary_total"], 25)
+            self.assertEqual(streamer_page.status_code, 200)
+            self.assertEqual(streamer_page.json()["total"], 13)
+            self.assertEqual(
+                streamer_page.json()["items"][0]["subscription_count"],
+                2,
+            )
+
             private_row = {
                 **group_row,
                 "id": group_row["id"] + 1,
@@ -271,6 +469,20 @@ class WebSecurityTests(unittest.TestCase):
                 headers=headers,
             )
             self.assertEqual(deleted.status_code, 200)
+            self.assertEqual(
+                client.delete(
+                    f"/admin/api/subscriptions/{private_sub_id}",
+                    headers=headers,
+                ).status_code,
+                200,
+            )
+            self.assertEqual(
+                client.delete(
+                    f"/admin/api/subscriptions/{guild_sub_id}",
+                    headers=headers,
+                ).status_code,
+                200,
+            )
 
             missing = client.delete(
                 f"/admin/api/subscriptions/{sub_id}",
@@ -345,7 +557,7 @@ class RoomResolverTests(unittest.IsolatedAsyncioTestCase):
             "haruka_bot.web.app.get_user_info",
             new=AsyncMock(return_value={"card": {"name": "测试主播"}}),
         ):
-            room = await _resolve_room("https://live.bilibili.com/42")
+            room = await _resolve_room(42)
         self.assertEqual(
             room,
             {
@@ -356,13 +568,36 @@ class RoomResolverTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_resolve_uid_success(self):
+        with patch(
+            "haruka_bot.web.app.get_user_info",
+            new=AsyncMock(
+                return_value={
+                    "card": {
+                        "name": "UID测试主播",
+                        "live_room": {"roomid": 3002},
+                    }
+                }
+            ),
+        ):
+            room = await _resolve_uid(1002)
+        self.assertEqual(
+            room,
+            {
+                "uid": 1002,
+                "name": "UID测试主播",
+                "room_id": 3002,
+                "short_id": 0,
+            },
+        )
+
     async def test_resolve_room_error_mapping(self):
         with patch(
             "haruka_bot.web.app.get",
             new=AsyncMock(return_value={}),
         ):
             with self.assertRaises(RoomResolveError) as missing:
-                await _resolve_room("100")
+                await _resolve_room(100)
         self.assertEqual(missing.exception.status_code, 422)
 
         for code, expected in ((-404, 422), (-412, 429), (-500, 502)):
@@ -373,7 +608,7 @@ class RoomResolverTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ):
                 with self.assertRaises(RoomResolveError) as mapped:
-                    await _resolve_room("100")
+                    await _resolve_room(100)
                 self.assertEqual(mapped.exception.status_code, expected)
 
         with patch(
@@ -381,7 +616,7 @@ class RoomResolverTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(side_effect=RuntimeError("network unavailable")),
         ):
             with self.assertRaises(RoomResolveError) as upstream:
-                await _resolve_room("100")
+                await _resolve_room(100)
         self.assertEqual(upstream.exception.status_code, 502)
 
     async def test_resolve_room_timeout(self):
@@ -396,9 +631,28 @@ class RoomResolverTests(unittest.IsolatedAsyncioTestCase):
             new=slow_resolver,
         ):
             with self.assertRaises(RoomResolveError) as timeout:
-                await _resolve_room("100")
+                await _resolve_room(100)
         self.assertEqual(timeout.exception.status_code, 502)
         self.assertIn("超时", timeout.exception.detail)
+
+
+class SendResultTests(unittest.IsolatedAsyncioTestCase):
+    async def test_strict_send_does_not_fallback(self):
+        fallback_bot = SimpleNamespace(call_api=AsyncMock(return_value={"message_id": 1}))
+        with patch(
+            "haruka_bot.utils.nonebot.get_bots",
+            return_value={"3002": fallback_bot},
+        ):
+            result = await safe_send(
+                bot_id=3001,
+                send_type="private",
+                type_id=5001,
+                message="test",
+                allow_fallback=False,
+            )
+        self.assertFalse(result.success)
+        self.assertEqual(result.code, "bot_offline")
+        fallback_bot.call_api.assert_not_awaited()
 
 
 class SubscriptionDatabaseTests(unittest.IsolatedAsyncioTestCase):
@@ -474,6 +728,28 @@ class SubscriptionDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second)
 
         sub = await db.get_sub(uid=1001, type="group", type_id=2001)
+        await db.record_push_delivery(
+            subscription_id=sub.id,
+            attempted_at=123456,
+            success=False,
+            event_type="test",
+            bot_id=3001,
+            error_code="bot_offline",
+            error_message="配置机器人未连接",
+        )
+        delivery = (await db.get_push_delivery_states())[sub.id]
+        self.assertFalse(delivery.success)
+        self.assertEqual(delivery.error_code, "bot_offline")
+        await db.add_web_audit(
+            action="test",
+            target_ids=[sub.id],
+            success=True,
+            summary="数据库测试",
+        )
+        audits, audit_total = await db.get_web_audits(offset=0, limit=20)
+        self.assertEqual(audit_total, 1)
+        self.assertEqual(audits[0].action, "test")
+
         updated = await db.update_sub_by_id(
             sub.id,
             bot_id=3002,
@@ -489,6 +765,7 @@ class SubscriptionDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(changed.at)
 
         await db.delete_sub_by_id(sub.id)
+        self.assertNotIn(sub.id, await db.get_push_delivery_states())
         self.assertIsNotNone(await db.get_user(uid=1001))
 
         remaining = await db.get_sub(uid=1001, type="group", type_id=2002)

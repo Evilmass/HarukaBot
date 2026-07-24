@@ -76,6 +76,29 @@ class LiveSession(BaseModel):
     active = BooleanField(default=True)
 
 
+class PushDeliveryState(BaseModel):
+    """Most recent delivery result for one subscription."""
+
+    subscription_id = IntField(pk=True)
+    attempted_at = IntField()
+    success = BooleanField()
+    event_type = CharField(max_length=30)
+    bot_id = IntField()
+    error_code = CharField(max_length=40, null=True)
+    error_message = TextField(null=True)
+
+
+class WebAuditLog(BaseModel):
+    """Administrative operations performed through the Web UI."""
+
+    created_at = IntField(index=True)
+    actor = CharField(max_length=40)
+    action = CharField(max_length=40, index=True)
+    target_ids = TextField()
+    success = BooleanField()
+    summary = TextField()
+
+
 class User(BaseModel):
     uid = IntField(pk=True)
     name = CharField(max_length=20)
