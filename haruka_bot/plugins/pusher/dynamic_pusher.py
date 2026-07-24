@@ -8,7 +8,7 @@ from apscheduler.events import (
     EVENT_SCHEDULER_STARTED,
 )
 from bilireq.exceptions import GrpcError
-from bilireq.grpc.dynamic import grpc_get_user_dynamics
+from bilireq.grpc import dynamic as _bili_dynamic
 from bilireq.grpc.protos.bilibili.app.dynamic.v2.dynamic_pb2 import DynamicType
 from grpc import StatusCode
 from grpc.aio import AioRpcError
@@ -19,6 +19,42 @@ from ...config import plugin_config
 from ...database import DB as db
 from ...database import dynamic_offset as offset
 from ...utils import get_dynamic_screenshot, safe_send, scheduler
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: bilireq 的 grpc_get_user_dynamics 丢弃了 gRPC metadata
+# 导致 B 站返回 -352（风控校验失败）。这里用修复版本替换原函数。
+# ---------------------------------------------------------------------------
+def _patch_grpc_get_user_dynamics():
+    from bilireq.grpc.protos.bilibili.app.dynamic.v2.dynamic_pb2 import (
+        DynSpaceReq as _DynSpaceReq,
+    )
+    from bilireq.grpc.protos.bilibili.app.dynamic.v2.dynamic_pb2 import (
+        DynSpaceRsp as _DynSpaceRsp,
+    )
+    from bilireq.grpc.protos.bilibili.app.dynamic.v2.dynamic_pb2_grpc import (
+        DynamicStub as _DynamicStub,
+    )
+    from bilireq.grpc.utils import grpc_request as _grpc_request
+
+    @_grpc_request
+    async def _patched(
+        uid: int, offset: str = "", page: int = 1, **kwargs
+    ) -> _DynSpaceRsp:
+        stub = _DynamicStub(kwargs.pop("_channel"))
+        req = _DynSpaceReq(host_uid=uid, history_offset=offset, page=page)
+        # 关键修复：将 metadata 和 timeout 正确传递给 gRPC 调用
+        return await stub.DynSpace(
+            req,
+            metadata=kwargs.pop("metadata", None),
+            timeout=kwargs.pop("timeout", None),
+        )
+
+    _bili_dynamic.grpc_get_user_dynamics = _patched
+
+
+_patch_grpc_get_user_dynamics()
+# ---------------------------------------------------------------------------
 
 
 async def dy_sched():
@@ -36,7 +72,7 @@ async def dy_sched():
     try:
         # 获取 UP 最新动态列表
         dynamics = (
-            await grpc_get_user_dynamics(
+            await _bili_dynamic.grpc_get_user_dynamics(
                 uid,
                 timeout=plugin_config.haruka_dynamic_timeout,
                 proxy=plugin_config.haruka_proxy,
@@ -65,11 +101,15 @@ async def dy_sched():
         if len(dynamics) == 1:  # 只有一条动态
             offset[uid] = int(dynamics[0].extend.dyn_id_str)
         else:  # 第一个可能是置顶动态，但置顶也可能是最新一条，所以取前两条的最大值
-            offset[uid] = max(int(dynamics[0].extend.dyn_id_str), int(dynamics[1].extend.dyn_id_str))
+            offset[uid] = max(
+                int(dynamics[0].extend.dyn_id_str), int(dynamics[1].extend.dyn_id_str)
+            )
         return
 
     dynamic = None
-    for dynamic in sorted(dynamics, key=lambda x: int(x.extend.dyn_id_str)):  # 动态从旧到新排列
+    for dynamic in sorted(
+        dynamics, key=lambda x: int(x.extend.dyn_id_str)
+    ):  # 动态从旧到新排列
         dynamic_id = int(dynamic.extend.dyn_id_str)
         if dynamic_id > offset[uid]:
             logger.info(f"检测到新动态（{dynamic_id}）：{name}（{uid}）")
@@ -127,13 +167,18 @@ def dynamic_lisener(event):
         return
     job = scheduler.get_job("dynamic_sched")
     if not job:
-        scheduler.add_job(dy_sched, id="dynamic_sched", next_run_time=datetime.now(scheduler.timezone))
+        scheduler.add_job(
+            dy_sched, id="dynamic_sched", next_run_time=datetime.now(scheduler.timezone)
+        )
 
 
 if plugin_config.haruka_dynamic_interval == 0:
     scheduler.add_listener(
         dynamic_lisener,
-        EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_SCHEDULER_STARTED,
+        EVENT_JOB_EXECUTED
+        | EVENT_JOB_ERROR
+        | EVENT_JOB_MISSED
+        | EVENT_SCHEDULER_STARTED,
     )
 else:
     scheduler.add_job(

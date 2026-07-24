@@ -36,6 +36,9 @@ class Config(BaseSettings):
     haruka_command_prefix: str = ""
     haruka_bili_video_groups: List[int] = []
     haruka_bili_video_cookie: Optional[str] = None
+    # 通用 B 站 Cookie（用于动态/直播等需要登录态的 gRPC 接口），
+    # 未配置时回退使用 haruka_bili_video_cookie
+    haruka_bili_auth_cookie: Optional[str] = None
     haruka_bili_video_quality: int = 80
     haruka_bili_video_max_size_mb: int = 100
     haruka_bili_video_max_links: int = 3
