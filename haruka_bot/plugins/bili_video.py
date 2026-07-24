@@ -45,7 +45,7 @@ DEFAULT_USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 VIDEO_DOWNLOAD_ROUTE = "/haruka/bili-video/{token}/video.mp4"
-VIDEO_MESSAGE_SAFE_LIMIT_MB = 95
+VIDEO_MESSAGE_SAFE_LIMIT_MB = 100
 VIDEO_MESSAGE_SAFE_LIMIT_BYTES = VIDEO_MESSAGE_SAFE_LIMIT_MB * 1024 * 1024
 _temporary_video_files: Dict[str, Path] = {}
 
@@ -706,26 +706,6 @@ async def send_video(
         f"{time.perf_counter() - download_started:.2f} 秒"
     )
 
-    description_started = time.perf_counter()
-    logger.info(f"[B站视频][{info.bvid}] 开始发送视频说明")
-    try:
-        await bot.send_group_msg(
-            group_id=event.group_id,
-            message=description,
-            _timeout=plugin_config.haruka_bili_video_timeout,
-        )
-    except Exception as error:
-        logger.warning(
-            f"[B站视频][{info.bvid}] 视频说明发送失败："
-            f"耗时 {time.perf_counter() - description_started:.2f} 秒，"
-            f"异常类型 {type(error).__name__}：{error}"
-        )
-        raise
-    logger.info(
-        f"[B站视频][{info.bvid}] 视频说明发送完成，耗时 "
-        f"{time.perf_counter() - description_started:.2f} 秒"
-    )
-
     if size > VIDEO_MESSAGE_SAFE_LIMIT_BYTES:
         file_name = (
             f"{info.bvid}-P{info.page_number}.mp4"
@@ -756,31 +736,50 @@ async def send_video(
             f"[B站视频][{info.bvid}] 群文件上传完成：{file_name}，耗时 "
             f"{time.perf_counter() - upload_started:.2f} 秒"
         )
-        return
+    else:
+        video = Message(MessageSegment.video(str(napcat_video_path)))
+        logger.info(
+            f"[B站视频][{info.bvid}] 开始发送普通群视频："
+            f"视频 {size_mb:.1f} MB，"
+            f"OneBot 超时 {plugin_config.haruka_bili_video_timeout} 秒"
+        )
+        onebot_started = time.perf_counter()
+        try:
+            await bot.send_group_msg(
+                group_id=event.group_id,
+                message=video,
+                _timeout=plugin_config.haruka_bili_video_timeout,
+            )
+        except Exception as error:
+            logger.warning(
+                f"[B站视频][{info.bvid}] 普通群视频发送失败："
+                f"耗时 {time.perf_counter() - onebot_started:.2f} 秒，"
+                f"异常类型 {type(error).__name__}：{error}"
+            )
+            raise
+        logger.info(
+            f"[B站视频][{info.bvid}] 普通群视频发送成功，耗时 "
+            f"{time.perf_counter() - onebot_started:.2f} 秒"
+        )
 
-    video = Message(MessageSegment.video(str(napcat_video_path)))
-    logger.info(
-        f"[B站视频][{info.bvid}] 开始发送普通群视频："
-        f"视频 {size_mb:.1f} MB，"
-        f"OneBot 超时 {plugin_config.haruka_bili_video_timeout} 秒"
-    )
-    onebot_started = time.perf_counter()
+    description_started = time.perf_counter()
+    logger.info(f"[B站视频][{info.bvid}] 媒体发送完成，开始发送视频说明")
     try:
         await bot.send_group_msg(
             group_id=event.group_id,
-            message=video,
+            message=description,
             _timeout=plugin_config.haruka_bili_video_timeout,
         )
     except Exception as error:
         logger.warning(
-            f"[B站视频][{info.bvid}] 普通群视频发送失败："
-            f"耗时 {time.perf_counter() - onebot_started:.2f} 秒，"
+            f"[B站视频][{info.bvid}] 视频说明发送失败："
+            f"耗时 {time.perf_counter() - description_started:.2f} 秒，"
             f"异常类型 {type(error).__name__}：{error}"
         )
         raise
     logger.info(
-        f"[B站视频][{info.bvid}] 普通群视频发送成功，耗时 "
-        f"{time.perf_counter() - onebot_started:.2f} 秒"
+        f"[B站视频][{info.bvid}] 视频说明发送完成，耗时 "
+        f"{time.perf_counter() - description_started:.2f} 秒"
     )
 
 

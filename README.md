@@ -68,7 +68,7 @@ HARUKA_BILI_VIDEO_COOKIE=
 # HarukaBot 对 NapCat 可访问的地址
 HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 HARUKA_BILI_VIDEO_QUALITY=80
-# 单个视频的下载总上限；超过 95 MB 时自动上传为群文件
+# 单个视频的下载总上限；超过 100 MB 时自动上传为群文件
 HARUKA_BILI_VIDEO_MAX_SIZE_MB=512
 HARUKA_BILI_VIDEO_MAX_LINKS=3
 HARUKA_BILI_VIDEO_CONCURRENCY=2
@@ -77,8 +77,9 @@ HARUKA_BILI_VIDEO_TIMEOUT=600
 
 宿主机运行时需安装 `ffmpeg` 并确保它在 `PATH` 中；Docker 镜像已内置。
 HarukaBot 会通过临时 HTTP 地址让 NapCat 下载合并后的视频，再使用 NapCat
-本地路径发送消息。小于等于 95 MB 时发送普通群视频，超过 95 MB 时自动上传
+本地路径发送消息。小于等于 100 MB 时发送普通群视频，超过 100 MB 时自动上传
 为群文件，避免合并转发中的视频在手机端无法查看。
+标题、UP、时长和原链接会在视频发送或群文件上传完成后紧接着发送。
 `HARUKA_BILI_VIDEO_PUBLIC_BASE_URL` 必须填写 NapCat 能够访问的 HarukaBot
 地址；临时地址使用随机令牌并在下载完成后立即失效。
 

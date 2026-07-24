@@ -398,9 +398,7 @@ class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
             Config().haruka_bili_video_timeout,
         )
         self.assertEqual(bot.send_group_msg.await_count, 2)
-        description_call, video_call = bot.send_group_msg.await_args_list
-        self.assertEqual(description_call.kwargs["group_id"], 123456)
-        self.assertIn("title", str(description_call.kwargs["message"]))
+        video_call, description_call = bot.send_group_msg.await_args_list
         self.assertEqual(video_call.kwargs["group_id"], 123456)
         self.assertEqual(
             video_call.kwargs["_timeout"],
@@ -409,16 +407,27 @@ class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
         video = video_call.kwargs["message"][0]
         self.assertEqual(video.type, "video")
         self.assertEqual(video.data["file"], napcat_path)
+        self.assertEqual(description_call.kwargs["group_id"], 123456)
+        self.assertIn("title", str(description_call.kwargs["message"]))
         bot.send_group_forward_msg.assert_not_awaited()
         self.assertFalse(_temporary_video_files)
 
     async def test_large_video_is_uploaded_as_group_file(self):
         bot, event, info, video_path = self._video_fixture()
         napcat_path = "/app/.config/QQ/NapCat/temp/video.mp4"
-        bot.call_api.side_effect = [
-            {"file": napcat_path},
-            {"file_id": "group-file-id"},
-        ]
+        send_order = []
+
+        async def call_api(action, **kwargs):
+            send_order.append(action)
+            if action == "download_file":
+                return {"file": napcat_path}
+            return {"file_id": "group-file-id"}
+
+        async def send_group_msg(**kwargs):
+            send_order.append("send_group_msg")
+
+        bot.call_api.side_effect = call_api
+        bot.send_group_msg.side_effect = send_group_msg
         with (
             patch.object(
                 plugin_config,
@@ -439,6 +448,10 @@ class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(upload_call.kwargs["file"], napcat_path)
         self.assertEqual(upload_call.kwargs["name"], "BV1xx411c7mD.mp4")
         self.assertEqual(bot.send_group_msg.await_count, 1)
+        self.assertEqual(
+            send_order,
+            ["download_file", "upload_group_file", "send_group_msg"],
+        )
         bot.send_group_forward_msg.assert_not_awaited()
         self.assertFalse(_temporary_video_files)
 
@@ -470,7 +483,7 @@ class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
     async def test_video_send_failure_leaves_no_temporary_url(self):
         bot, event, info, video_path = self._video_fixture()
         bot.call_api.return_value = {"file": "/tmp/video.mp4"}
-        bot.send_group_msg.side_effect = [None, RuntimeError("video send failed")]
+        bot.send_group_msg.side_effect = RuntimeError("video send failed")
         with patch.object(
             plugin_config,
             "haruka_bili_video_public_base_url",
@@ -499,6 +512,25 @@ class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "group file failed"):
                 await send_video(bot, event, info, video_path)
+        bot.send_group_msg.assert_not_awaited()
+        self.assertFalse(_temporary_video_files)
+
+    async def test_description_failure_happens_after_video_send(self):
+        bot, event, info, video_path = self._video_fixture()
+        bot.call_api.return_value = {"file": "/tmp/video.mp4"}
+        bot.send_group_msg.side_effect = [
+            None,
+            RuntimeError("description failed"),
+        ]
+        with patch.object(
+            plugin_config,
+            "haruka_bili_video_public_base_url",
+            "http://192.168.31.131:7070",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "description failed"):
+                await send_video(bot, event, info, video_path)
+        first_message = bot.send_group_msg.await_args_list[0].kwargs["message"]
+        self.assertEqual(first_message[0].type, "video")
         self.assertFalse(_temporary_video_files)
 
 
