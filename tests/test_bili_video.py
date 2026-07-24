@@ -290,16 +290,23 @@ class BiliVideoForwardTests(unittest.IsolatedAsyncioTestCase):
         )
         TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         video_path = TEST_OUTPUT_DIR / "forward-placeholder.mp4"
-        video_path.touch()
+        video_path.write_bytes(b"video-content")
         await send_forward_video(bot, event, info, video_path)
 
         call = bot.send_group_forward_msg.await_args
         self.assertEqual(call.kwargs["group_id"], 123456)
+        self.assertEqual(
+            call.kwargs["_timeout"],
+            Config().haruka_bili_video_timeout,
+        )
         messages = call.kwargs["messages"]
         self.assertEqual(len(messages), 2)
         video = messages[1]["data"]["content"][0]
         self.assertEqual(video.type, "video")
-        self.assertTrue(video.data["file"].startswith("file:///"))
+        self.assertEqual(
+            video.data["file"],
+            "base64://dmlkZW8tY29udGVudA==",
+        )
 
 
 if __name__ == "__main__":

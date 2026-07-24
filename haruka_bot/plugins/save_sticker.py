@@ -32,7 +32,7 @@ async def handle_face_extraction(bot: Bot, event: MessageEvent):
         original_message = event.reply.message
         # 提取表情包并发送回去，静态表情包可以直接被保存
         for seg in original_message:
-            logger.debug("seg: " + seg + " type: " + str(seg.type))
+            logger.debug(f"seg: {seg} type: {seg.type}")
             if seg.type == "image":
                 content = MessageSegment.text("表情：") + MessageSegment.image(
                     seg.data["url"], type_=0

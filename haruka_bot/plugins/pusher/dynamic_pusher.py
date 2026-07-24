@@ -71,13 +71,17 @@ async def dy_sched():
     logger.debug(f"爬取动态 {name}（{uid}）")
     try:
         # 获取 UP 最新动态列表
-        dynamics = (
-            await _bili_dynamic.grpc_get_user_dynamics(
-                uid,
-                timeout=plugin_config.haruka_dynamic_timeout,
-                proxy=plugin_config.haruka_proxy,
+        response = await _bili_dynamic.grpc_get_user_dynamics(
+            uid,
+            timeout=plugin_config.haruka_dynamic_timeout,
+            proxy=plugin_config.haruka_proxy,
+        )
+        if response is None:
+            logger.warning(
+                f"爬取动态未返回数据，将在下个轮询中重试：{name}（{uid}）"
             )
-        ).list
+            return
+        dynamics = response.list
     except AioRpcError as e:
         if e.code() == StatusCode.DEADLINE_EXCEEDED:
             logger.error(f"爬取动态超时，将在下个轮询中重试：{e.code()} {e.details()}")
@@ -172,7 +176,9 @@ def dynamic_lisener(event):
         )
 
 
-if plugin_config.haruka_dynamic_interval == 0:
+if not plugin_config.haruka_dynamic_enabled:
+    logger.info("动态推送全局开关已关闭，不启动动态爬取任务")
+elif plugin_config.haruka_dynamic_interval == 0:
     scheduler.add_listener(
         dynamic_lisener,
         EVENT_JOB_EXECUTED

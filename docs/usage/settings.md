@@ -122,6 +122,17 @@ HARUKA_PROXY=http://127.0.0.1:10809
 HARUKA_INTERVAL=20
 ```
 
+## HARUKA_DYNAMIC_ENABLED
+
+默认值：True
+
+动态推送全局开关。设置为 `False` 时不会启动动态爬取任务；修改后需要重启
+HarukaBot。
+
+```yml
+HARUKA_DYNAMIC_ENABLED=False
+```
+
 ## HARUKA_DYNAMIC_INTERVAL
 
 默认值：0

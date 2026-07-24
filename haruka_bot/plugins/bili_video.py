@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import re
 import shutil
@@ -14,6 +15,7 @@ import httpx
 from nonebot import on_message
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent
+from nonebot.adapters.onebot.v11.exception import NetworkError
 from nonebot.log import logger
 from nonebot.rule import Rule
 
@@ -487,15 +489,10 @@ def _format_duration(seconds: int) -> str:
     return f"{minute:02d}:{second:02d}"
 
 
-async def _delayed_cleanup(directory: Path, delay: float = 60.0) -> None:
-    """延迟清理下载目录，给 NapCat/OneBot 足够时间复制视频文件。"""
-    await asyncio.sleep(delay)
-    try:
-        if directory.is_dir():
-            shutil.rmtree(directory, ignore_errors=True)
-            logger.debug(f"已清理下载目录：{directory}")
-    except Exception:
-        pass
+def _video_base64_uri(video_path: Path) -> str:
+    """将视频编码为 OneBot 可跨进程、跨容器传输的资源地址。"""
+    encoded = base64.b64encode(video_path.read_bytes()).decode("ascii")
+    return f"base64://{encoded}"
 
 
 def _cleanup_stale_downloads(download_root: Path, min_age_seconds: int = 300) -> None:
@@ -524,8 +521,15 @@ async def send_forward_video(
         f"{info.title}\nUP：{info.owner}{part}\n"
         f"时长：{_format_duration(info.duration)}\n{info.canonical_url}"
     )
-    video = Message(MessageSegment.video(video_path.resolve().as_uri()))
+    loop = asyncio.get_running_loop()
+    video_uri = await loop.run_in_executor(None, _video_base64_uri, video_path)
+    video = Message(MessageSegment.video(video_uri))
     node_base = {"name": "HarukaBot", "uin": str(bot.self_id)}
+    size_mb = video_path.stat().st_size / 1024 / 1024
+    logger.info(
+        f"正在发送 B 站视频 {info.bvid}（{size_mb:.1f} MB），"
+        f"OneBot 超时 {plugin_config.haruka_bili_video_timeout} 秒"
+    )
     await bot.send_group_forward_msg(
         group_id=event.group_id,
         messages=[
@@ -538,6 +542,7 @@ async def send_forward_video(
                 "data": {**node_base, "content": video},
             },
         ],
+        _timeout=plugin_config.haruka_bili_video_timeout,
     )
 
 
@@ -593,8 +598,6 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
         for reference in references:
             try:
                 async with download_semaphore:
-                    # 使用手动管理的目录替代 TemporaryDirectory，
-                    # 避免 NapCat 异步复制文件前目录就被删除。
                     download_dir = download_root / f"download-{uuid.uuid4().hex[:12]}"
                     download_dir.mkdir(parents=True, exist_ok=True)
                     try:
@@ -603,14 +606,26 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent):
                         )
                         await send_forward_video(bot, event, info, video_path)
                     finally:
-                        # 延迟 60 秒后清理，给 NapCat 足够时间复制文件
-                        asyncio.create_task(_delayed_cleanup(download_dir))
+                        # 视频内容已随 OneBot 请求传输，不再依赖 NapCat 读取本地路径。
+                        shutil.rmtree(download_dir, ignore_errors=True)
             except BiliVideoError as error:
                 logger.warning(f"B 站视频 {reference.key} 下载失败：{error}")
                 await bot.send_group_msg(
                     group_id=event.group_id,
                     message=f"B 站视频下载失败：{error}",
                 )
+            except NetworkError as error:
+                logger.warning(f"B 站视频 {reference.key} 发送超时：{error}")
+                try:
+                    await bot.send_group_msg(
+                        group_id=event.group_id,
+                        message=(
+                            "B 站视频发送超时，OneBot 客户端可能仍在处理中，"
+                            "请先确认群内是否收到视频"
+                        ),
+                    )
+                except NetworkError as notify_error:
+                    logger.warning(f"B 站视频发送超时提示发送失败：{notify_error}")
             except Exception:
                 logger.exception(f"B 站视频 {reference.key} 处理失败")
                 await bot.send_group_msg(

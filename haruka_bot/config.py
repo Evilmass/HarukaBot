@@ -23,6 +23,7 @@ class Config(BaseSettings):
     haruka_proxy: Optional[str] = None
     haruka_interval: int = 10
     haruka_live_interval: int = haruka_interval
+    haruka_dynamic_enabled: bool = True
     haruka_dynamic_interval: int = 0
     haruka_dynamic_at: bool = False
     haruka_screenshot_style: str = "mobile"
