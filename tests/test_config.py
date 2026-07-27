@@ -8,6 +8,15 @@ from haruka_bot.config import Config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_nas_domain_defaults_to_none(self):
+        self.assertIsNone(Config().nas_domain)
+
+    def test_nas_domain_accepts_permanent_domain(self):
+        self.assertEqual(
+            Config(nas_domain="nas.example.com").nas_domain,
+            "nas.example.com",
+        )
+
     def test_dynamic_enabled_defaults_to_true(self):
         self.assertTrue(Config().haruka_dynamic_enabled)
 

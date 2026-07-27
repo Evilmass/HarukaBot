@@ -1,7 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, patch
 
-import aiohttp
 import nonebot
 
 nonebot.init()
@@ -9,60 +7,27 @@ nonebot.init()
 from haruka_bot.plugins import server_ip
 
 
-class _FakeSession:
-    async def __aenter__(self):
-        return self
+class ServerDomainTests(unittest.TestCase):
+    def setUp(self):
+        self.old_domain = server_ip.plugin_config.nas_domain
 
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        return None
+    def tearDown(self):
+        server_ip.plugin_config.nas_domain = self.old_domain
 
+    def test_get_server_domain_returns_configured_domain(self):
+        server_ip.plugin_config.nas_domain = "nas.example.com"
 
-class ServerIpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_get_server_ip_returns_valid_ipv4(self):
-        with patch.object(
-            server_ip.aiohttp,
-            "ClientSession",
-            return_value=_FakeSession(),
-        ), patch.object(
-            server_ip,
-            "fetch",
-            new=AsyncMock(return_value="203.0.113.8"),
-        ) as fetch:
-            result = await server_ip.get_server_ip()
+        self.assertEqual(server_ip.get_server_domain(), "nas.example.com")
 
-        self.assertEqual(result, "203.0.113.8")
-        fetch.assert_awaited_once_with(
-            unittest.mock.ANY,
-            "https://api-ipv4.ip.sb/ip",
-        )
+    def test_get_server_domain_strips_whitespace(self):
+        server_ip.plugin_config.nas_domain = "  nas.example.com  "
 
-    async def test_get_server_ip_handles_http_error(self):
-        with patch.object(
-            server_ip.aiohttp,
-            "ClientSession",
-            return_value=_FakeSession(),
-        ), patch.object(
-            server_ip,
-            "fetch",
-            new=AsyncMock(side_effect=aiohttp.ClientError("upstream failed")),
-        ):
-            result = await server_ip.get_server_ip()
+        self.assertEqual(server_ip.get_server_domain(), "nas.example.com")
 
-        self.assertEqual(result, "无法获取")
+    def test_get_server_domain_handles_missing_config(self):
+        server_ip.plugin_config.nas_domain = None
 
-    async def test_get_server_ip_rejects_unexpected_response(self):
-        with patch.object(
-            server_ip.aiohttp,
-            "ClientSession",
-            return_value=_FakeSession(),
-        ), patch.object(
-            server_ip,
-            "fetch",
-            new=AsyncMock(return_value="<html>not found</html>"),
-        ):
-            result = await server_ip.get_server_ip()
-
-        self.assertEqual(result, "无法获取")
+        self.assertEqual(server_ip.get_server_domain(), "未配置")
 
 
 if __name__ == "__main__":

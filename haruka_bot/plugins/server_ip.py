@@ -1,9 +1,10 @@
-import asyncio
-import ipaddress
+# import asyncio
+# import ipaddress
 
-import aiohttp
-from nonebot import logger
+# import aiohttp
+# from nonebot import logger
 
+from ..config import plugin_config
 from ..utils import on_command, permission_check, to_me
 from ..version import __version__
 
@@ -25,24 +26,25 @@ server_ip.__doc__ = """获取联机服务器地址 -> ip"""
 server_ip.handle()(permission_check)
 
 
-async def fetch(session: aiohttp.ClientSession, url: str) -> str:
-    async with session.get(url, headers=IP_API_HEADERS) as response:
-        response.raise_for_status()
-        return (await response.text()).strip()
+# async def fetch(session: aiohttp.ClientSession, url: str) -> str:
+#     async with session.get(url, headers=IP_API_HEADERS) as response:
+#         response.raise_for_status()
+#         return (await response.text()).strip()
 
 
 async def get_server_ip() -> str:
-    timeout = aiohttp.ClientTimeout(total=IP_API_TIMEOUT)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            value = await fetch(session, IP_API_URL)
-        ip = ipaddress.ip_address(value)
-        if ip.version != 4:
-            raise ValueError(f"接口返回的不是 IPv4 地址: {value!r}")
-        return str(ip)
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as error:
-        logger.warning(f"获取服务器公网 IP 失败: {error}")
-        return "无法获取"
+    # timeout = aiohttp.ClientTimeout(total=IP_API_TIMEOUT)
+    # try:
+    #     async with aiohttp.ClientSession(timeout=timeout) as session:
+    #         value = await fetch(session, IP_API_URL)
+    #     ip = ipaddress.ip_address(value)
+    #     if ip.version != 4:
+    #         raise ValueError(f"接口返回的不是 IPv4 地址: {value!r}")
+    #     return str(ip)
+    # except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as error:
+    #     logger.warning(f"获取服务器公网 IP 失败: {error}")
+    #     return "无法获取"
+    return plugin_config.nas_domain.strip() or "未配置"
 
 
 @server_ip.handle()
