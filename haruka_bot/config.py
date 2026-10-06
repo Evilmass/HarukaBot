@@ -49,11 +49,21 @@ class Config(BaseSettings):
     haruka_bili_video_concurrency: int = 2
     haruka_bili_video_ffmpeg: str = "ffmpeg"
     haruka_bili_video_timeout: int = 600
+    # 未配置通用选项时，继续使用旧的 B 站选项。
+    haruka_video_public_base_url: Optional[str] = None
+    haruka_video_max_size_mb: Optional[int] = None
+    haruka_video_max_links: Optional[int] = None
+    haruka_video_concurrency: Optional[int] = None
+    haruka_video_ffmpeg: Optional[str] = None
+    haruka_video_timeout: Optional[int] = None
+    haruka_douyin_video_groups: List[int] = []
+    haruka_douyin_video_cookie: Optional[str] = None
+    haruka_douyin_video_cookie_file: Optional[str] = None
     # 频道管理员身份组
     haruka_guild_admin_roles: List[str] = ["频道主", "超级管理员"]
     ignore_group: Optional[List[int]]
 
-    @validator("haruka_bili_video_groups", pre=True)
+    @validator("haruka_bili_video_groups", "haruka_douyin_video_groups", pre=True)
     def parse_bili_video_groups(cls, v):
         """群号既支持 JSON 数组，也支持逗号或空格分隔。"""
         if v is None or v == "":
@@ -76,6 +86,13 @@ class Config(BaseSettings):
     )
     def positive_bili_video_setting(cls, v: int):
         return max(v, 1)
+
+    @validator(
+        "haruka_video_max_size_mb", "haruka_video_max_links",
+        "haruka_video_concurrency", "haruka_video_timeout",
+    )
+    def positive_video_setting(cls, v: Optional[int]):
+        return max(v, 1) if v is not None else None
 
     @validator("haruka_interval", "haruka_live_interval", "haruka_dynamic_interval")
     def non_negative(cls, v: int, field: ModelField):
@@ -118,7 +135,7 @@ class Config(BaseSettings):
 
         @classmethod
         def parse_env_var(cls, field_name: str, raw_value: str):
-            if field_name == "haruka_bili_video_groups":
+            if field_name in {"haruka_bili_video_groups", "haruka_douyin_video_groups"}:
                 return raw_value
             return json.loads(raw_value)
 

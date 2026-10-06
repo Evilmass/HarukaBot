@@ -4,6 +4,8 @@
 
 docs/.yarn
 !data/.gitkeep
+data/*cookies*.txt
+data/video/
 accounts/
 go-cqhttp/
 logs/

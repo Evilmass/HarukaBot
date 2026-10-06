@@ -3,27 +3,23 @@ import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import nonebot
-from fastapi import HTTPException
 
 nonebot.init()
 nonebot.load_plugin("nonebot_plugin_guild_patch")
 
 from haruka_bot.config import Config, plugin_config
+from haruka_bot.video.service import video_service
+from haruka_bot.video.bilibili import BiliVideoProvider, VideoReference
+from haruka_bot.video.models import VideoSettings
 from haruka_bot.plugins.bili_video import (
-    VIDEO_SERVE_PREFIX,
     BiliVideoDownloader,
     BiliVideoError,
     VideoInfo,
-    _build_video_url,
     _http_client_options,
-    _serve_video_file,
-    _set_video_serve_dir,
-    _video_serve_dir,
-    compress_video,
     extract_message_urls,
     get_dash_stream_candidates,
     parse_video_url,
@@ -64,60 +60,6 @@ class BiliVideoConfigTests(unittest.TestCase):
         )
 
 
-class BiliVideoServeFileTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        self.serve_dir = TEST_OUTPUT_DIR / "serve"
-        self.serve_dir.mkdir(parents=True, exist_ok=True)
-        self.video_path = self.serve_dir / "BV1xx411c7mD" / "video.mp4"
-        self.video_path.parent.mkdir(parents=True, exist_ok=True)
-        self.video_path.write_bytes(b"serve-video-content")
-        _set_video_serve_dir(self.serve_dir)
-
-    def tearDown(self):
-        _set_video_serve_dir(None)
-
-    async def test_serve_video_returns_file(self):
-        response = await _serve_video_file("BV1xx411c7mD/video.mp4")
-        sent_messages = []
-
-        async def receive():
-            return {"type": "http.request", "body": b"", "more_body": False}
-
-        async def send(message):
-            sent_messages.append(message)
-
-        await response(
-            {"type": "http", "method": "GET", "path": "/test", "headers": []},
-            receive,
-            send,
-        )
-        body = b"".join(message.get("body", b"") for message in sent_messages)
-        self.assertEqual(body, b"serve-video-content")
-        self.assertEqual(response.media_type, "video/mp4")
-        self.assertEqual(response.headers["cache-control"], "no-store")
-
-    async def test_serve_missing_file_returns_404(self):
-        with self.assertRaises(HTTPException) as ctx:
-            await _serve_video_file("nonexistent/video.mp4")
-        self.assertEqual(ctx.exception.status_code, 404)
-
-    async def test_serve_video_blocks_path_traversal(self):
-        with self.assertRaises(HTTPException) as ctx:
-            await _serve_video_file("../../../etc/passwd")
-        self.assertEqual(ctx.exception.status_code, 404)
-
-    async def test_serve_video_when_dir_not_set(self):
-        _set_video_serve_dir(None)
-        with self.assertRaises(HTTPException) as ctx:
-            await _serve_video_file("test/video.mp4")
-        self.assertEqual(ctx.exception.status_code, 503)
-
-    def test_route_registered(self):
-        self.assertIn(
-            f"{VIDEO_SERVE_PREFIX}/{{filename:path}}",
-            {route.path for route in nonebot.get_app().routes},
-        )
 
 
 class BiliVideoUrlTests(unittest.IsolatedAsyncioTestCase):
@@ -316,40 +258,9 @@ class BiliVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(video, video_low)
         self.assertIs(selected_audio, audio)
 
-    async def test_all_qualities_exceed_max_but_fit_compress(self):
-        """所有清晰度超 max_bytes 但在 compress_max_bytes 内时触发压缩兜底。"""
-        video_high = {"id": 80, "baseUrl": "high", "codecs": "avc1"}
-        video_low = {"id": 64, "baseUrl": "low", "codecs": "avc1"}
-        audio = {"id": 30280, "baseUrl": "audio"}
-        client = AsyncMock(spec=httpx.AsyncClient)
-        downloader = BiliVideoDownloader(client)
-        max_bytes = downloader.max_bytes
-        compress_max = 200 * 1024 * 1024  # 200 MB
-        sizes = {
-            "audio": 20 * 1024 * 1024,
-            "high": max_bytes,  # 刚好等于 max，加上 audio 就超了
-            "low": max_bytes - 5 * 1024 * 1024,  # 略低于 max，但加上 audio 也超
-        }
-        downloader._probe_stream_size = AsyncMock(
-            side_effect=lambda stream, referer: sizes[stream["baseUrl"]]
-        )
 
-        video, selected_audio = await downloader._select_fitting_dash_streams(
-            {
-                "dash": {
-                    "video": [video_high, video_low],
-                    "audio": [audio],
-                }
-            },
-            "https://www.bilibili.com/video/BV1xx411c7mD",
-            compress_max_bytes=compress_max,
-        )
-
-        self.assertIs(video, video_low)
-        self.assertIs(selected_audio, audio)
-
-    async def test_all_qualities_exceed_both_limits_raises(self):
-        """所有清晰度同时超过 max_bytes 和 compress_max_bytes 时抛出异常。"""
+    async def test_all_qualities_exceed_limit_raises(self):
+        """所有清晰度超过大小限制时抛出异常。"""
         video_high = {"id": 80, "baseUrl": "high", "codecs": "avc1"}
         video_low = {"id": 64, "baseUrl": "low", "codecs": "avc1"}
         audio = {"id": 30280, "baseUrl": "audio"}
@@ -373,11 +284,10 @@ class BiliVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
                     }
                 },
                 "https://www.bilibili.com/video/BV1xx411c7mD",
-                compress_max_bytes=150 * 1024 * 1024,
             )
 
-    async def test_compress_disabled_when_all_exceed_max_raises(self):
-        """压缩未启用（compress_max_bytes=None）时，所有清晰度超限应立即报错。"""
+    async def test_combined_audio_video_exceeds_limit_raises(self):
+        """视频本身未超限，但合计音频大小超限时仍拒绝下载。"""
         video_high = {"id": 80, "baseUrl": "high", "codecs": "avc1"}
         video_low = {"id": 64, "baseUrl": "low", "codecs": "avc1"}
         audio = {"id": 30280, "baseUrl": "audio"}
@@ -402,7 +312,6 @@ class BiliVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
                     }
                 },
                 "https://www.bilibili.com/video/BV1xx411c7mD",
-                compress_max_bytes=None,
             )
 
     @unittest.skipUnless(
@@ -427,6 +336,9 @@ class BiliVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self):
+        await video_service.store.close()
+
     def _video_fixture(self):
         bot = AsyncMock()
         bot.self_id = "10000"
@@ -487,7 +399,7 @@ class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
         content2 = node2["data"]["content"]
         self.assertEqual(content2[0].type, "video")
         self.assertIn(
-            "http://192.168.31.131:7070/haruka/bili-video/files/BV1xx411c7mD/video.mp4",
+            "http://192.168.31.131:7070/haruka/video/files/",
             content2[0].data["file"],
         )
 
@@ -517,18 +429,6 @@ class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("P2", node1_content)
         self.assertIn("第二章", node1_content)
 
-    async def test_send_video_builds_correct_url(self):
-        """视频 URL 按 BVID 组织路径。"""
-        with patch.object(
-            plugin_config,
-            "haruka_bili_video_public_base_url",
-            "http://192.168.31.131:7070",
-        ):
-            url = _build_video_url("BV1xx411c7mD/video.mp4")
-        self.assertEqual(
-            url,
-            "http://192.168.31.131:7070/haruka/bili-video/files/BV1xx411c7mD/video.mp4",
-        )
 
     async def test_send_video_failure_propagates(self):
         """合并转发发送失败时异常正确传播。"""
@@ -542,175 +442,77 @@ class BiliVideoSendTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "forward failed"):
                 await send_video(bot, event, info, video_path)
 
-    async def test_send_video_compress_label(self):
-        """send_video 在描述前附加压缩标记。"""
-        bot = AsyncMock()
-        bot.self_id = "999"
-        event = SimpleNamespace(group_id=123456)
-        info = VideoInfo(
-            bvid="BV1xx411c7mD",
-            title="title",
-            owner="owner",
-            page_name="",
-            page_number=1,
-            page_count=1,
-            cid=100,
-            duration=120,
-        )
-        video_path = TEST_OUTPUT_DIR / "compress-label.mp4"
-        video_path.write_bytes(b"video-content")
 
-        with patch.object(
-            plugin_config,
-            "haruka_bili_video_public_base_url",
-            "http://192.168.31.131:7070",
-        ):
-            await send_video(bot, event, info, video_path, compress_label="（已压缩）")
+class BiliVideoPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_av_reference_is_canonicalized_for_bv_deduplication(self):
+        def handler(request):
+            return httpx.Response(200, json={"code": 0, "data": {
+                "bvid": "BV1xx411c7mD", "title": "title", "owner": {"name": "owner"},
+                "pages": [{"cid": 100, "part": "part", "duration": 65}],
+            }})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = BiliVideoProvider(client, VideoSettings(None, 90, 3, 2, "ffmpeg", 30))
+            av = await provider.resolve("https://www.bilibili.com/video/av123")
+            bv = await provider.resolve("https://www.bilibili.com/video/BV1xx411c7mD")
+            self.assertEqual(av.key, bv.key)
+            self.assertEqual((await provider.downloader.get_video_info(av)).cid, 100)
 
-        # 描述内容应包含压缩标记
-        node1_content = bot.send_group_forward_msg.await_args.kwargs["messages"][0][
-            "data"
-        ]["content"]
-        self.assertIn("（已压缩）", node1_content)
-
-
-class BiliVideoCompressTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    async def test_ffmpeg_merge_uses_both_inputs_and_copy_codec(self):
+        client = AsyncMock(spec=httpx.AsyncClient)
+        downloader = BiliVideoDownloader(client)
         TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        self.video_path = TEST_OUTPUT_DIR / "compress-input.mp4"
-        self.video_path.write_bytes(b"x" * 200 * 1024 * 1024)  # 200 MB fake
-        self.compress_output = self.video_path.parent / "compressed.mp4"
-        # Clean up any leftover compressed files
-        if self.compress_output.exists():
-            self.compress_output.unlink()
-
-    def tearDown(self):
-        if self.compress_output.exists():
-            self.compress_output.unlink()
-
-    async def test_compress_video_success(self):
-        """压缩成功：返回压缩后的路径且大小在目标内。"""
-
-        async def mock_communicate():
-            self.compress_output.write_bytes(b"y" * 90 * 1024 * 1024)  # 90 MB
+        output = TEST_OUTPUT_DIR / "merged-video.mp4"
+        process = MagicMock()
+        process.returncode = 0
+        async def communicate():
+            output.write_bytes(b"merged-video")
             return b"", b""
+        process.communicate = AsyncMock(side_effect=communicate)
+        with patch("haruka_bot.video.bilibili.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as create:
+            await downloader._run_ffmpeg([Path("video.m4s"), Path("audio.m4s")], output)
+        args = create.await_args.args
+        self.assertEqual(args.count("-i"), 2)
+        self.assertEqual(args[args.index("-c") + 1], "copy")
+        self.assertEqual(args[args.index("-movflags") + 1], "+faststart")
+        self.assertEqual(output.read_bytes(), b"merged-video")
 
-        mock_process = AsyncMock()
-        mock_process.communicate.side_effect = mock_communicate
-        mock_process.returncode = 0
-
-        with patch(
-            "haruka_bot.plugins.bili_video.asyncio.create_subprocess_exec",
-            AsyncMock(return_value=mock_process),
-        ):
-            result = await compress_video(
-                self.video_path,
-                duration_seconds=600,
-                log_id="test",
-                target_bytes=95 * 1024 * 1024,
-                min_bitrate_bps=500_000,
-            )
-
-        self.assertEqual(result, self.compress_output)
-        self.assertTrue(self.compress_output.is_file())
-
-    async def test_compress_video_ffmpeg_not_found(self):
-        """FFmpeg 未安装时抛出 BiliVideoError。"""
-        with patch(
-            "haruka_bot.plugins.bili_video.asyncio.create_subprocess_exec",
-            AsyncMock(side_effect=FileNotFoundError),
-        ):
+    async def test_ffmpeg_missing_and_timeout_are_safe_errors(self):
+        downloader = BiliVideoDownloader(AsyncMock(spec=httpx.AsyncClient))
+        with patch("haruka_bot.video.bilibili.asyncio.create_subprocess_exec", AsyncMock(side_effect=FileNotFoundError)):
             with self.assertRaisesRegex(BiliVideoError, "未找到 FFmpeg"):
-                await compress_video(
-                    self.video_path,
-                    duration_seconds=600,
-                    log_id="test",
-                    target_bytes=95 * 1024 * 1024,
-                    min_bitrate_bps=500_000,
-                )
+                await downloader._run_ffmpeg([], Path("unused.mp4"))
+        process = MagicMock()
+        process.returncode = None
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        async def timeout(awaitable, **kwargs):
+            awaitable.close()
+            raise asyncio.TimeoutError
+        with patch("haruka_bot.video.bilibili.asyncio.create_subprocess_exec", AsyncMock(return_value=process)), patch("haruka_bot.video.bilibili.asyncio.wait_for", side_effect=timeout):
+            with self.assertRaisesRegex(BiliVideoError, "超时"):
+                await downloader._run_ffmpeg([], Path("unused.mp4"))
+        process.kill.assert_called_once()
 
-    async def test_compress_video_timeout(self):
-        """压缩超时时抛出 BiliVideoError。"""
-        mock_process = AsyncMock()
-        mock_process.communicate = AsyncMock(return_value=(b"", b""))
-        mock_process.kill = AsyncMock()
-        mock_process.returncode = 0
-
-        with (
-            patch(
-                "haruka_bot.plugins.bili_video.asyncio.create_subprocess_exec",
-                AsyncMock(return_value=mock_process),
-            ),
-            patch(
-                "haruka_bot.plugins.bili_video.asyncio.wait_for",
-                AsyncMock(side_effect=asyncio.TimeoutError),
-            ),
-        ):
-            with self.assertRaisesRegex(BiliVideoError, "压缩视频超时"):
-                await compress_video(
-                    self.video_path,
-                    duration_seconds=600,
-                    log_id="test",
-                    target_bytes=95 * 1024 * 1024,
-                    min_bitrate_bps=500_000,
-                )
-
-    async def test_compress_video_retry_on_oversized(self):
-        """第一次压缩仍超限时，降低码率重试成功。"""
-        call_count = 0
-
-        async def mock_communicate():
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                self.compress_output.write_bytes(b"z" * 100 * 1024 * 1024)  # 仍超 95MB
-            else:
-                self.compress_output.write_bytes(b"w" * 90 * 1024 * 1024)  # 90 MB - OK
+    async def test_cancelling_ffmpeg_kills_and_reaps_process(self):
+        downloader = BiliVideoDownloader(AsyncMock(spec=httpx.AsyncClient))
+        process = MagicMock()
+        process.returncode = None
+        started = asyncio.Event()
+        async def communicate():
+            started.set()
+            if not process.kill.called:
+                await asyncio.Event().wait()
             return b"", b""
+        process.communicate = AsyncMock(side_effect=communicate)
+        with patch("haruka_bot.video.bilibili.asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+            task = asyncio.create_task(downloader._run_ffmpeg([], Path("unused.mp4")))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        process.kill.assert_called_once()
 
-        mock_process = AsyncMock()
-        mock_process.communicate.side_effect = mock_communicate
-        mock_process.returncode = 0
 
-        with patch(
-            "haruka_bot.plugins.bili_video.asyncio.create_subprocess_exec",
-            AsyncMock(return_value=mock_process),
-        ):
-            result = await compress_video(
-                self.video_path,
-                duration_seconds=600,
-                log_id="test",
-                target_bytes=95 * 1024 * 1024,
-                min_bitrate_bps=500_000,
-            )
 
-        self.assertEqual(result, self.compress_output)
-        self.assertEqual(call_count, 2)
-
-    async def test_compress_video_min_bitrate_fallback(self):
-        """两次压缩都失败时抛出 BiliVideoError（回退群文件）。"""
-
-        async def mock_communicate():
-            # Always produce > target size
-            self.compress_output.write_bytes(b"z" * 100 * 1024 * 1024)
-            return b"", b""
-
-        mock_process = AsyncMock()
-        mock_process.communicate.side_effect = mock_communicate
-        mock_process.returncode = 0
-
-        with patch(
-            "haruka_bot.plugins.bili_video.asyncio.create_subprocess_exec",
-            AsyncMock(return_value=mock_process),
-        ):
-            with self.assertRaisesRegex(BiliVideoError, "超过 95 MB 限制"):
-                await compress_video(
-                    self.video_path,
-                    duration_seconds=600,
-                    log_id="test",
-                    target_bytes=95 * 1024 * 1024,
-                    min_bitrate_bps=500_000,
-                )
 
 
 if __name__ == "__main__":

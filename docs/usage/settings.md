@@ -201,15 +201,56 @@ HARUKA_DYNAMIC_AT=True
 
 默认值：未配置
 
-HarukaBot 对 OneBot/NapCat 可访问的 HTTP 地址，用于临时传输下载并合并后的
-B 站视频。NapCat 下载完成后，小于等于 100 MB 的文件作为普通群视频发送，
-更大的文件自动上传为群文件；视频说明会在媒体发送完成后紧接着发送。
+HarukaBot 对 OneBot/NapCat 可访问的 HTTP 地址。该旧选项继续有效，
+未设置 `HARUKA_VIDEO_PUBLIC_BASE_URL` 时，两平台的视频服务都使用此地址。
+机器人通过“作品说明＋视频”两个节点发送合并转发消息；超出大小上限时拒绝发送。
 启用群聊 B 站视频转发时必须配置，不要填写 `0.0.0.0` 或 `127.0.0.1`，
 应填写 NapCat 实际能够访问的局域网地址或域名。
 
 ```yml
 HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 ```
+
+## 通用视频下载配置
+
+以下选项用于 B 站和抖音的共用下载流程。未设置时继承同名后缀的
+`HARUKA_BILI_VIDEO_*` 配置，原有部署无需修改 B 站配置。
+
+| 配置 | 生效默认值 | 说明 |
+| --- | --- | --- |
+| `HARUKA_VIDEO_PUBLIC_BASE_URL` | 未配置 | NapCat 能访问的 HarukaBot 地址 |
+| `HARUKA_VIDEO_MAX_SIZE_MB` | 90 | 单个作品大小上限，单位 MiB，超限拒绝发送 |
+| `HARUKA_VIDEO_MAX_LINKS` | 3 | 每条消息两平台合计最多处理的作品数 |
+| `HARUKA_VIDEO_CONCURRENCY` | 2 | 两平台共享的解析、下载和发送并发数 |
+| `HARUKA_VIDEO_FFMPEG` | ffmpeg | B 站 DASH 合并使用的 FFmpeg 路径 |
+| `HARUKA_VIDEO_TIMEOUT` | 600 | 单个作品从解析到发送完成的总超时，单位秒 |
+
+文件仅通过已登记任务的临时 HTTP 地址开放，发送后保留 300 秒。
+失败及取消的任务立即清理，活跃任务不参与残留目录清理。
+
+## 抖音视频配置
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `HARUKA_DOUYIN_VIDEO_GROUPS` | `[]` | 允许自动解析抖音视频的群号；JSON 数组或逗号、空格分隔 |
+| `HARUKA_DOUYIN_VIDEO_COOKIE` | 未配置 | Cookie 请求头字符串，非空时优先于文件 |
+| `HARUKA_DOUYIN_VIDEO_COOKIE_FILE` | `HARUKA_DIR/douyin_cookies.txt` | Netscape Cookie 文件；自定义相对路径以 HARUKA_DIR 为根 |
+
+```dotenv
+HARUKA_DOUYIN_VIDEO_GROUPS=[123456789]
+HARUKA_DOUYIN_VIDEO_COOKIE_FILE=douyin_cookies.txt
+HARUKA_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
+```
+
+复制抖音分享文本或发送作品链接后，会下载视频并回传合并转发消息。
+支持 `v.douyin.com`、`jx.douyin.com`、桌面端、移动端和精选链接。
+图集、作者订阅、直播和私聊不在支持范围内。
+
+默认 Cookie 文件不存在时仍会尝试请求。配置了自定义路径但文件不存在、
+文件格式错误或无读取权限时，会给出配置错误提示。Cookie 文件必须为 Netscape
+格式，保留原有域和路径，忽略已过期 Cookie；文件中的 0 有效期按会话 Cookie 处理。
+接口受限时需更新 Cookie，文件在新的群消息任务中重新读取，无需重启。
+Cookie 不会发送给媒体 CDN，也不会写入日志；请勿将凭据提交到版本库。
 
 <!-- ## HARUKA_SCREENSHOT_STYLE
 

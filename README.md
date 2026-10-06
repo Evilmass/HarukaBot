@@ -52,13 +52,15 @@ HarukaBot 针对不同的推送场景（粉丝群、娱乐群、直播通知群�
 ## websocket-client
 ws://127.0.0.1:7070/onebot/v11/ws
 
-## 群聊 B 站视频转发
+## 群聊 B 站与抖音视频转发
 
 配置允许使用该功能的 QQ 群后，机器人会捕捉群消息中的
 `bilibili.com/video/...`、`b23.tv/...`、`b23.wtf/...` 和
 `bili2233.cn/...` 视频链接，下载最高不超过配置清晰度的 DASH 视频、音频流，
-通过 FFmpeg 合并为 MP4，再发送标题信息和视频。最高画质超过文件大小限制时
-会自动逐档降低清晰度。
+通过 FFmpeg 合并为 MP4。抖音支持复制分享文本、`v.douyin.com`、
+`jx.douyin.com` 短链，以及桌面端、移动端和精选的视频作品链接，直接下载 MP4。
+两个平台均通过合并转发消息发送作品说明和视频。B 站最高画质超过文件大小
+限制时会逐档降低清晰度；仍然超限时拒绝发送，不进行压缩或上传群文件。
 
 ```dotenv
 # JSON 数组，或使用逗号/空格分隔的群号
@@ -68,20 +70,42 @@ HARUKA_BILI_VIDEO_COOKIE=
 # HarukaBot 对 NapCat 可访问的地址
 HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 HARUKA_BILI_VIDEO_QUALITY=80
-# 单个视频的下载总上限；超过 100 MB 时自动上传为群文件
-HARUKA_BILI_VIDEO_MAX_SIZE_MB=512
+# 单个视频的下载总上限；超限时拒绝发送
+HARUKA_BILI_VIDEO_MAX_SIZE_MB=90
 HARUKA_BILI_VIDEO_MAX_LINKS=3
 HARUKA_BILI_VIDEO_CONCURRENCY=2
 HARUKA_BILI_VIDEO_TIMEOUT=600
+
+# 抖音白名单独立设置；[] 表示关闭
+HARUKA_DOUYIN_VIDEO_GROUPS=[123456789]
+# 可选：非空字符串优先于 Cookie 文件
+HARUKA_DOUYIN_VIDEO_COOKIE=
+# Netscape 文件；默认读取 HARUKA_DIR/douyin_cookies.txt
+# 相对路径以 HARUKA_DIR 为根，也可以配置绝对路径
+HARUKA_DOUYIN_VIDEO_COOKIE_FILE=douyin_cookies.txt
+
+# 可选通用配置：设置后优先于对应 HARUKA_BILI_VIDEO_*，未设置则继承旧值
+HARUKA_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
+HARUKA_VIDEO_MAX_SIZE_MB=90
+HARUKA_VIDEO_MAX_LINKS=3
+HARUKA_VIDEO_CONCURRENCY=2
+HARUKA_VIDEO_FFMPEG=ffmpeg
+HARUKA_VIDEO_TIMEOUT=600
 ```
 
 宿主机运行时需安装 `ffmpeg` 并确保它在 `PATH` 中；Docker 镜像已内置。
-HarukaBot 会通过临时 HTTP 地址让 NapCat 下载合并后的视频，再使用 NapCat
-本地路径发送消息。小于等于 100 MB 时发送普通群视频，超过 100 MB 时自动上传
-为群文件，避免合并转发中的视频在手机端无法查看。
-标题、UP、时长和原链接会在视频发送或群文件上传完成后紧接着发送。
-`HARUKA_BILI_VIDEO_PUBLIC_BASE_URL` 必须填写 NapCat 能够访问的 HarukaBot
-地址；临时地址使用随机令牌并在下载完成后立即失效。
+HarukaBot 会通过临时 HTTP 地址让 NapCat 获取视频，以“作品说明＋视频”两个
+节点发送合并转发消息。公开地址必须填写 NapCat 能访问的 HarukaBot 地址。
+每次任务使用随机 ID，发送完成后文件保留 300 秒，然后地址失效；不同群、不同
+分 P 或同作品的并发任务分别存储，互不覆盖。
+
+`HARUKA_VIDEO_MAX_LINKS` 限制一条消息中两个平台合计处理的作品数，
+`HARUKA_VIDEO_CONCURRENCY` 限制两个平台共享的并发数，
+`HARUKA_VIDEO_TIMEOUT` 限制单个作品从解析到发送完成的总时间。
+抖音仅支持视频，不支持图集、作者订阅或直播。Cookie 可不配置，接口受限时
+需提供有效 Cookie；凭据仅用于平台请求，不会转发给媒体 CDN 或写入日志。
+实现参考 [nonebot-plugin-ifollow](https://github.com/ByteColtX/nonebot-plugin-ifollow)，
+无需安装该插件或升级当前依赖。
 
 ## Web 直播订阅管理
 
