@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 import time
@@ -16,6 +17,7 @@ nonebot.init()
 
 from haruka_bot.config import Config
 from haruka_bot.video import bilibili, douyin
+from haruka_bot.video.cache import VideoCache
 from haruka_bot.video.files import VIDEO_SERVE_PREFIX, VideoFileStore
 from haruka_bot.video.models import DownloadedVideo, VideoError, VideoSettings
 from haruka_bot.video.service import VideoService, allowed_platforms, message_candidates
@@ -64,6 +66,13 @@ class VideoConfigTests(unittest.TestCase):
         self.assertEqual(allowed_platforms(123, config), {"bilibili"})
         self.assertEqual(allowed_platforms(456, config), {"douyin"})
         self.assertEqual(allowed_platforms(789, config), set())
+
+    def test_video_cache_settings_defaults_and_limits(self):
+        config = Config()
+        self.assertTrue(config.haruka_video_cache_enabled)
+        self.assertEqual(config.haruka_video_cache_days, 7)
+        self.assertEqual(Config(haruka_video_cache_days=0).haruka_video_cache_days, 1)
+        self.assertFalse(Config(haruka_video_cache_enabled=False).haruka_video_cache_enabled)
 
     def test_mixed_links_order_and_miniapp_extraction(self):
         mixed = event("https://v.douyin.com/abc/ https://www.bilibili.com/video/BV1xx411c7mD")
@@ -132,6 +141,77 @@ class VideoFileTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.jobs[retained].directory.exists())
 
 
+class VideoCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name) / "cache"
+        self.cache = VideoCache(self.root, ttl=7 * 86400)
+
+    def _video(self, **overrides):
+        path = Path(self.directory.name) / "source.mp4"
+        path.write_bytes(MP4)
+        values = {
+            "platform": "bilibili", "video_id": "BV1xx411c7mD", "title": "标题",
+            "author": "UP", "duration": 65,
+            "canonical_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "path": path, "part_label": "P1 分P",
+        }
+        values.update(overrides)
+        return DownloadedVideo(**values)
+
+    def test_roundtrip_metadata_and_file_survive_source_removal(self):
+        video = self._video()
+        key = ("BV1xx411c7mD", 1)
+        self.cache.save(video, "bilibili", key)
+        video.path.unlink()
+        cached = self.cache.lookup("bilibili", key)
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.description, video.description)
+        self.assertEqual(cached.path.read_bytes(), MP4)
+        self.assertEqual(cached.path.name, "video.mp4")
+        self.assertIsNone(self.cache.lookup("bilibili", ("BV1xx411c7mD", 2)))
+        self.assertIsNone(self.cache.lookup("douyin", key))
+
+    def test_expired_or_tampered_entries_are_discarded(self):
+        video = self._video()
+        key = ("BV1xx411c7mD", 1)
+        self.cache.save(video, "bilibili", key)
+        entry = self.root / "bilibili" / "BV1xx411c7mD-p1"
+        meta_path = entry / "meta.json"
+        meta = json.loads(meta_path.read_text("utf-8"))
+        meta["created_at"] = time.time() - 8 * 86400
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        self.assertIsNone(self.cache.lookup("bilibili", key))
+        self.assertFalse(entry.exists())
+
+    def test_cleanup_removes_expired_and_incomplete_entries(self):
+        self.cache.save(self._video(), "bilibili", ("BV1xx411c7mD", 1))
+        stale = self.root / "douyin" / "stale"
+        stale.mkdir(parents=True)
+        os.utime(stale, (time.time() - 100, time.time() - 100))
+        self.cache.ttl = -1
+        self.cache.cleanup()
+        self.assertFalse((self.root / "bilibili" / "BV1xx411c7mD-p1").exists())
+        self.assertFalse(stale.exists())
+
+    def test_disabled_cache_does_not_store_or_read(self):
+        video = self._video()
+        key = ("BV1xx411c7mD", 1)
+        self.cache.enabled = False
+        self.cache.save(video, "bilibili", key)
+        self.assertIsNone(self.cache.lookup("bilibili", key))
+        self.assertFalse(self.root.exists())
+
+    def test_unsafe_keys_stay_under_cache_root(self):
+        video = self._video()
+        key = ("../../escape", 1)
+        self.cache.save(video, "bilibili", key)
+        cached = self.cache.lookup("bilibili", key)
+        self.assertIsNotNone(cached)
+        cached.path.resolve().relative_to(self.root)
+
+
 class FakeProvider:
     def __init__(self, platform, downloads):
         self.platform = platform
@@ -184,20 +264,68 @@ class VideoServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("作者：作者", nodes[0]["data"]["content"])
         self.assertEqual(nodes[1]["data"]["content"][0].type, "video")
 
-    async def test_same_video_across_groups_and_parts_has_independent_files(self):
+    async def test_same_video_across_groups_and_parts_reuses_cache(self):
         await asyncio.gather(
             self.service.handle(self.bot, event("https://www.bilibili.com/video/BV1xx411c7mD?p=1", 123)),
             self.service.handle(self.bot, event("https://www.bilibili.com/video/BV1xx411c7mD?p=2", 123)),
             self.service.handle(self.bot, event("https://www.bilibili.com/video/BV1xx411c7mD?p=1", 456)),
         )
-        paths = [item[2] for item in self.downloads]
+        # p=1 只下载一次，另一群直接使用缓存；p=2 单独下载。
+        self.assertEqual(len(self.downloads), 2)
+        jobs = list(self.service.store.jobs.values())
+        self.assertEqual(len(jobs), 3)
+        paths = [job.path for job in jobs]
+        self.assertTrue(all(path is not None and path.is_file() for path in paths))
         self.assertEqual(len(set(paths)), 3)
-        self.assertTrue(all(path.is_file() for path in paths))
         urls = [call.kwargs["messages"][1]["data"]["content"][0].data["file"] for call in self.bot.send_group_forward_msg.await_args_list]
         self.assertEqual(len(set(urls)), 3)
-        jobs = list(self.service.store.jobs)
-        self.service.store.remove(jobs[0])
+        self.service.store.remove(next(iter(self.service.store.jobs)))
         self.assertEqual(sum(path.is_file() for path in paths), 2)
+
+    async def test_repeated_video_uses_cache_and_survives_job_cleanup(self):
+        url = "https://www.douyin.com/video/123"
+        await self.service.handle(self.bot, event(url, 123))
+        self.assertEqual(len(self.downloads), 1)
+        await self.service.handle(self.bot, event(url, 456))
+        self.assertEqual(len(self.downloads), 1)
+        self.assertEqual(self.bot.send_group_forward_msg.await_count, 2)
+        nodes = self.bot.send_group_forward_msg.await_args_list[1].kwargs["messages"]
+        self.assertIn("标题", nodes[0]["data"]["content"])
+        self.assertEqual(nodes[1]["data"]["content"][0].type, "video")
+        cache_video = Path(self.directory.name) / "video" / "cache" / "douyin" / "123-p1" / "video.mp4"
+        self.assertTrue(cache_video.is_file())
+        jobs = list(self.service.store.jobs.values())
+        self.assertEqual(len(jobs), 2)
+        self.assertTrue(all(job.path.is_file() for job in jobs))
+        for task_id in list(self.service.store.jobs):
+            self.service.store.remove(task_id)
+        self.assertTrue(cache_video.is_file())
+        await self.service.handle(self.bot, event(url, 123))
+        self.assertEqual(len(self.downloads), 1)
+        self.assertEqual(self.bot.send_group_forward_msg.await_count, 3)
+
+    async def test_concurrent_same_video_downloads_once(self):
+        await asyncio.gather(
+            self.service.handle(self.bot, event("https://www.douyin.com/video/123", 123)),
+            self.service.handle(self.bot, event("https://www.douyin.com/video/123", 456)),
+        )
+        self.assertEqual(len(self.downloads), 1)
+        self.assertEqual(self.bot.send_group_forward_msg.await_count, 2)
+
+    async def test_expired_cache_is_removed_and_video_redownloaded(self):
+        url = "https://www.douyin.com/video/123"
+        await self.service.handle(self.bot, event(url, 123))
+        self.service.cache.ttl = -1
+        await self.service.handle(self.bot, event(url, 123))
+        self.assertEqual(len(self.downloads), 2)
+
+    async def test_cache_can_be_disabled(self):
+        self.service.cache.enabled = False
+        url = "https://www.douyin.com/video/123"
+        await self.service.handle(self.bot, event(url, 123))
+        await self.service.handle(self.bot, event(url, 456))
+        self.assertEqual(len(self.downloads), 2)
+        self.assertFalse((Path(self.directory.name) / "video" / "cache").exists())
 
     async def test_ignored_groups_self_messages_and_non_video_text_do_nothing(self):
         for item in [event("https://www.douyin.com/video/123", 999), event("https://www.douyin.com/video/123", user_id=10000), event("hello")]:

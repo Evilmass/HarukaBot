@@ -224,9 +224,16 @@ HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 | `HARUKA_VIDEO_CONCURRENCY` | 2 | 两平台共享的解析、下载和发送并发数 |
 | `HARUKA_VIDEO_FFMPEG` | ffmpeg | B 站 DASH 合并使用的 FFmpeg 路径 |
 | `HARUKA_VIDEO_TIMEOUT` | 600 | 单个作品从解析到发送完成的总超时，单位秒 |
+| `HARUKA_VIDEO_CACHE_ENABLED` | True | 是否复用已下载的视频文件 |
+| `HARUKA_VIDEO_CACHE_DAYS` | 7 | 视频文件保留天数，超过后重新下载 |
 
 文件仅通过已登记任务的临时 HTTP 地址开放，发送后保留 300 秒。
 失败及取消的任务立即清理，活跃任务不参与残留目录清理。
+
+下载成功的视频会缓存在 `HARUKA_DIR/video/cache` 下，按平台和作品分别保存。
+保留期内再次收到同一作品时，直接使用缓存文件发送合并转发消息，
+不再请求解析接口或重新下载；相同作品的并发请求只会实际下载一次。
+过期缓存和异常退出留下的不完整目录会在启动及运行期间自动清理。
 
 ## 抖音视频配置
 

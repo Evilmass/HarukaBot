@@ -56,6 +56,9 @@ class Config(BaseSettings):
     haruka_video_concurrency: Optional[int] = None
     haruka_video_ffmpeg: Optional[str] = None
     haruka_video_timeout: Optional[int] = None
+    # 下载成功后按作品缓存视频文件，在保留期内直接复用，避免重复解析下载。
+    haruka_video_cache_enabled: bool = True
+    haruka_video_cache_days: int = 7
     haruka_douyin_video_groups: List[int] = []
     haruka_douyin_video_cookie: Optional[str] = None
     haruka_douyin_video_cookie_file: Optional[str] = None
@@ -93,6 +96,10 @@ class Config(BaseSettings):
     )
     def positive_video_setting(cls, v: Optional[int]):
         return max(v, 1) if v is not None else None
+
+    @validator("haruka_video_cache_days")
+    def positive_video_cache_days(cls, v: int):
+        return max(v, 1)
 
     @validator("haruka_interval", "haruka_live_interval", "haruka_dynamic_interval")
     def non_negative(cls, v: int, field: ModelField):

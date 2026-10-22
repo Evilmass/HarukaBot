@@ -91,13 +91,19 @@ HARUKA_VIDEO_MAX_LINKS=3
 HARUKA_VIDEO_CONCURRENCY=2
 HARUKA_VIDEO_FFMPEG=ffmpeg
 HARUKA_VIDEO_TIMEOUT=600
+# 下载成功的视频按作品缓存；保留期内直接复用，不再解析或下载
+HARUKA_VIDEO_CACHE_ENABLED=True
+HARUKA_VIDEO_CACHE_DAYS=7
 ```
 
 宿主机运行时需安装 `ffmpeg` 并确保它在 `PATH` 中；Docker 镜像已内置。
 HarukaBot 会通过临时 HTTP 地址让 NapCat 获取视频，以“作品说明＋视频”两个
 节点发送合并转发消息。公开地址必须填写 NapCat 能访问的 HarukaBot 地址。
-每次任务使用随机 ID，发送完成后文件保留 300 秒，然后地址失效；不同群、不同
-分 P 或同作品的并发任务分别存储，互不覆盖。
+每次任务使用随机 ID，发送完成后文件保留 300 秒，然后地址失效；不同群或不同
+分 P 的任务分别存储，互不覆盖。下载成功的视频会缓存在 `HARUKA_DIR/video/cache`
+下，保留期内再次收到同一作品时直接转发缓存文件，不再请求解析接口或重新下载，
+同一作品的并发请求只会实际下载一次。缓存默认保留 7 天，过期或异常退出留下的
+不完整目录会自动清理。
 
 `HARUKA_VIDEO_MAX_LINKS` 限制一条消息中两个平台合计处理的作品数，
 `HARUKA_VIDEO_CONCURRENCY` 限制两个平台共享的并发数，

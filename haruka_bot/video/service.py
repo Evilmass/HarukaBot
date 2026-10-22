@@ -1,6 +1,7 @@
 import asyncio
 import shutil
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -12,6 +13,7 @@ from nonebot.log import logger
 
 from ..config import Config, plugin_config
 from . import bilibili, douyin
+from .cache import VideoCache, link_or_copy
 from .files import VideoFileStore
 from .messages import message_search_text
 from .models import DownloadedVideo, VideoError, VideoSettings, VideoTooLarge
@@ -74,8 +76,14 @@ class VideoService:
         self.settings = VideoSettings.from_config(config)
         root = Path(config.haruka_dir or Path.cwd() / "data") / "video"
         self.store = store or VideoFileStore(root)
+        self.cache = VideoCache(
+            self.store.root / "cache",
+            ttl=max(config.haruka_video_cache_days, 1) * 86400,
+            enabled=config.haruka_video_cache_enabled,
+        )
         self.semaphore = asyncio.Semaphore(self.settings.concurrency)
         self.handlers: Set[asyncio.Task] = set()
+        self.key_locks: Dict[Tuple[str, str, int], List] = {}
         self.sweeper: Optional[asyncio.Task] = None
 
     async def _provider(self, platform: str, stack: AsyncExitStack):
@@ -92,12 +100,39 @@ class VideoService:
         ))
         return douyin.DouyinVideoProvider(client, media_client, self.settings)
 
-    async def _process(self, provider, platform, url, bot, event, seen) -> bool:
-        reference = await provider.resolve(url)
-        key = (platform, *reference.key)
-        if key in seen:
-            return False
-        seen.add(key)
+    @asynccontextmanager
+    async def _key_lock(self, key):
+        """相同作品的并发请求串行处理，等待者随后直接命中缓存。"""
+        entry = self.key_locks.get(key)
+        if entry is None:
+            entry = self.key_locks[key] = [asyncio.Lock(), 0]
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0 and self.key_locks.get(key) is entry:
+                del self.key_locks[key]
+
+    async def _send_cached(self, platform, cached, bot, event) -> None:
+        task_id = self.store.create(platform)
+        job = self.store.jobs[task_id]
+        try:
+            target = job.directory / "video.mp4"
+            link_or_copy(cached.path, target)
+            await send_video(
+                bot, event, replace(cached, path=target), self.store, task_id,
+                self.settings,
+            )
+        except BaseException:
+            self.store.remove(task_id)
+            raise
+        self.store.release(task_id)
+
+    async def _download_and_send(
+        self, provider, platform, reference, bot, event,
+    ) -> bool:
         task_id = self.store.create(platform)
         job = self.store.jobs[task_id]
         succeeded = False
@@ -105,6 +140,10 @@ class VideoService:
             video = await provider.download(reference, job.directory)
             await send_video(bot, event, video, self.store, task_id, self.settings)
             succeeded = True
+            try:
+                self.cache.save(video, platform, reference.key)
+            except Exception as error:
+                logger.warning(f"[视频缓存] 写入失败：{type(error).__name__}")
             # 最终 MP4 已登记；原始 DASH 流不需要在保留期间继续占用空间。
             for path in job.directory.iterdir():
                 if path != video.path and path.is_file():
@@ -119,6 +158,25 @@ class VideoService:
             else:
                 self.store.remove(task_id)
         return True
+
+    async def _process(self, provider, platform, url, bot, event, seen) -> bool:
+        reference = await provider.resolve(url)
+        key = (platform, *reference.key)
+        if key in seen:
+            return False
+        seen.add(key)
+        async with self._key_lock(key):
+            cached = self.cache.lookup(platform, reference.key)
+            if cached is not None:
+                await self._send_cached(platform, cached, bot, event)
+                logger.info(
+                    f"[{PLATFORM_NAMES[platform]}视频][{cached.video_id}] "
+                    "使用缓存转发，跳过下载"
+                )
+                return True
+            return await self._download_and_send(
+                provider, platform, reference, bot, event,
+            )
 
     async def _notify(self, bot, event, message: str) -> None:
         try:
@@ -138,7 +196,7 @@ class VideoService:
         current = asyncio.current_task()
         self.handlers.add(current)
         try:
-            await self._notify(bot, event, "检测到视频链接，正在下载……")
+            await self._notify(bot, event, "检测到视频链接，正在处理……")
             providers: Dict[str, object] = {}
             seen = set()
             processed = 0
@@ -169,14 +227,22 @@ class VideoService:
         finally:
             self.handlers.discard(current)
 
+    def _cleanup_cache(self) -> None:
+        try:
+            self.cache.cleanup()
+        except Exception as error:
+            logger.warning(f"[视频缓存] 清理失败：{type(error).__name__}")
+
     async def start(self) -> None:
         self.store.cleanup_stale(self.settings.timeout + 300)
+        self._cleanup_cache()
         self.sweeper = asyncio.create_task(self._sweep())
 
     async def _sweep(self) -> None:
         while True:
             await asyncio.sleep(60)
             self.store.cleanup_stale(self.settings.timeout + 300)
+            self._cleanup_cache()
 
     async def close(self) -> None:
         tasks = list(self.handlers)
