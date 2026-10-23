@@ -17,18 +17,25 @@ from .download import download_file, media_stream
 from .messages import message_search_text
 from .models import DEFAULT_USER_AGENT, DownloadedVideo, VideoError, VideoSettings
 
+VIDEO_HOSTS = {"bilibili.com", "www.bilibili.com", "m.bilibili.com"}
+SHORT_HOSTS = {"b23.tv", "b23.wtf", "bili2233.cn"}
+# 消息里的链接可能缺少协议头，同时避免匹配到更长域名中的同名片段。
+_URL_PREFIX = r"(?<![A-Za-z0-9._/-])(?:https?://)?"
+_URL_SUFFIX = r"[0-9A-Za-z?&=_%./:+~#@-]*"
 VIDEO_URL_RE = re.compile(
-    r"https?://(?:www\.|m\.)?bilibili\.com/video/"
-    r"(?:BV[0-9A-Za-z]{10}|av\d+)[0-9A-Za-z?&=_%./:+~#@-]*",
+    _URL_PREFIX + r"(?:www\.|m\.)?bilibili\.com/video/"
+    r"(?:BV[0-9A-Za-z]{10}|av\d+)" + _URL_SUFFIX,
     re.IGNORECASE,
 )
 SHORT_URL_RE = re.compile(
-    r"https?://(?:b23\.tv|b23\.wtf|bili2233\.cn)/"
-    r"[0-9A-Za-z]+[0-9A-Za-z?&=_%./:+~#@-]*",
+    _URL_PREFIX + r"(?:b23\.tv|b23\.wtf|bili2233\.cn)/"
+    r"[0-9A-Za-z]+" + _URL_SUFFIX,
     re.IGNORECASE,
 )
 VIDEO_ID_RE = re.compile(r"^(BV[0-9A-Za-z]{10}|av\d+)$", re.IGNORECASE)
+SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 TRAILING_URL_CHARS = ".,;:!?，。；：！？)]}）】》\"'"
+MAX_SHORT_REDIRECTS = 5
 API_VIEW = "https://api.bilibili.com/x/web-interface/view"
 API_PLAYURL = "https://api.bilibili.com/x/player/playurl"
 
@@ -80,12 +87,20 @@ def _clean_url(url: str) -> str:
     return url.rstrip(TRAILING_URL_CHARS)
 
 
+def _normalize_url(url: str) -> str:
+    """补全消息中省略的协议头。"""
+    url = _clean_url(url.strip())
+    if not SCHEME_RE.match(url):
+        return f"https://{url}"
+    return url
+
+
 def parse_video_url(url: str) -> Optional[VideoReference]:
     """将 B 站标准视频链接解析为下载引用。"""
-    url = _clean_url(url)
+    url = _normalize_url(url)
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    if host not in {"bilibili.com", "www.bilibili.com", "m.bilibili.com"}:
+    if host not in VIDEO_HOSTS:
         return None
 
     path_parts = [part for part in parsed.path.split("/") if part]
@@ -121,6 +136,90 @@ def extract_message_urls(text: str) -> List[str]:
     return result
 
 
+HTML_REFRESH_RE = re.compile(
+    r"<meta[^>]+http-equiv=[\"']?refresh[\"']?[^>]*>", re.IGNORECASE,
+)
+HTML_REFRESH_URL_RE = re.compile(r"url=([^;\"'>\s]+)", re.IGNORECASE)
+HTML_SCRIPT_REDIRECT_RE = re.compile(
+    r"location(?:\.href|\.replace)?\s*(?:=\s*|\(\s*)[\"']([^\"']+)[\"']",
+    re.IGNORECASE,
+)
+
+
+def _reference_from_redirect_page(text: str, base_url: str) -> Optional[VideoReference]:
+    """从 HTML 跳转页里提取目标视频地址。"""
+    for meta in HTML_REFRESH_RE.finditer(text):
+        match = HTML_REFRESH_URL_RE.search(meta.group(0))
+        if match:
+            reference = parse_video_url(str(httpx.URL(base_url).join(match.group(1))))
+            if reference is not None:
+                return reference
+    for match in HTML_SCRIPT_REDIRECT_RE.finditer(text):
+        reference = parse_video_url(str(httpx.URL(base_url).join(match.group(1))))
+        if reference is not None:
+            return reference
+    return None
+
+
+async def _request_short_url(url: str, client: httpx.AsyncClient) -> httpx.Response:
+    """请求短链本身；连接类错误重试一次。"""
+    for attempt in range(2):
+        try:
+            return await client.get(url, follow_redirects=False)
+        except httpx.TransportError:
+            if attempt:
+                raise
+            await asyncio.sleep(0.5)
+    raise RuntimeError("短链接请求未返回结果")
+
+
+async def _expand_short_url(
+    url: str, client: httpx.AsyncClient
+) -> Optional[VideoReference]:
+    """展开 B 站短链接。
+
+    只读取跳转响应头，不请求跳转后的 B 站页面，因此目标页面返回
+    412/404 或响应缓慢时仍能识别视频。
+    """
+    current = _normalize_url(url)
+    for _ in range(MAX_SHORT_REDIRECTS):
+        parsed = urlparse(current)
+        if parsed.scheme not in {"http", "https"} or (
+            (parsed.hostname or "").lower() not in SHORT_HOSTS
+        ):
+            logger.warning(f"B 站短链接 {url} 跳转到了非视频页面：{current}")
+            return None
+        try:
+            response = await _request_short_url(current, client)
+        except httpx.HTTPError as error:
+            logger.warning(f"无法展开 B 站短链接 {current}: {error}")
+            return None
+
+        reference = parse_video_url(str(response.url))
+        if reference is not None:
+            return reference
+
+        location = response.headers.get("location")
+        if location:
+            current = str(response.url.join(location))
+            reference = parse_video_url(current)
+            if reference is not None:
+                return reference
+            continue
+        if response.is_success:
+            reference = _reference_from_redirect_page(response.text, current)
+            if reference is not None:
+                return reference
+            logger.warning(f"B 站短链接 {current} 返回的页面里没有视频地址")
+        else:
+            logger.warning(
+                f"无法展开 B 站短链接 {current}: HTTP {response.status_code}"
+            )
+        return None
+    logger.warning(f"B 站短链接 {url} 跳转次数过多")
+    return None
+
+
 async def resolve_video_references(
     text: str, client: httpx.AsyncClient
 ) -> List[VideoReference]:
@@ -130,13 +229,7 @@ async def resolve_video_references(
     for url in extract_message_urls(text):
         reference = parse_video_url(url)
         if reference is None:
-            try:
-                response = await client.get(url)
-                response.raise_for_status()
-                reference = parse_video_url(str(response.url))
-            except (httpx.HTTPError, ValueError) as error:
-                logger.warning(f"无法展开 B 站短链接 {url}: {error}")
-                continue
+            reference = await _expand_short_url(url, client)
         if reference is not None and reference.key not in seen:
             seen.add(reference.key)
             references.append(reference)
@@ -688,7 +781,7 @@ class BiliVideoProvider:
     async def resolve(self, url: str) -> VideoReference:
         references = await resolve_video_references(url, self.downloader.client)
         if not references:
-            raise BiliVideoError("无法识别该 B 站视频链接")
+            raise BiliVideoError(f"无法识别该 B 站视频链接：{url}")
         reference = references[0]
         # av 和 BV 链接指向同一作品时，也应按作品而非链接去重。
         if reference.aid is not None:
