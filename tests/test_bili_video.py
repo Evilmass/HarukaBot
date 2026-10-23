@@ -13,7 +13,11 @@ nonebot.load_plugin("nonebot_plugin_guild_patch")
 
 from haruka_bot.config import Config, plugin_config
 from haruka_bot.video.service import video_service
-from haruka_bot.video.bilibili import BiliVideoProvider, VideoReference
+from haruka_bot.video.bilibili import (
+    BiliShortLinkError,
+    BiliVideoProvider,
+    VideoReference,
+)
 from haruka_bot.video.models import VideoSettings
 from haruka_bot.plugins.bili_video import (
     BiliVideoDownloader,
@@ -202,6 +206,55 @@ class BiliVideoUrlTests(unittest.IsolatedAsyncioTestCase):
                 result = await resolve_video_references("https://b23.tv/abc123", client)
 
         self.assertEqual(len(calls), 2)
+        self.assertEqual([reference.key for reference in result], [("BV1xx411c7mD", 1)])
+
+    async def test_short_link_falls_back_to_alternate_host(self):
+        visited = []
+
+        def handler(request):
+            visited.append(f"{request.url.host}{request.url.path}")
+            if request.url.host == "b23.tv":
+                raise httpx.ConnectTimeout("", request=request)
+            return httpx.Response(
+                302,
+                headers={"Location": "https://www.bilibili.com/video/BV1xx411c7mD"},
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch("haruka_bot.video.bilibili.asyncio.sleep", AsyncMock()):
+                result = await resolve_video_references("https://b23.tv/aqDxELv", client)
+
+        self.assertEqual(
+            visited,
+            ["b23.tv/aqDxELv", "b23.tv/aqDxELv", "bili2233.cn/aqDxELv"],
+        )
+        self.assertEqual([reference.key for reference in result], [("BV1xx411c7mD", 1)])
+
+    async def test_short_link_transport_failure_is_retryable(self):
+        def handler(request):
+            raise httpx.ConnectTimeout("", request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch("haruka_bot.video.bilibili.asyncio.sleep", AsyncMock()):
+                with self.assertRaises(BiliShortLinkError) as raised:
+                    await resolve_video_references("https://b23.tv/aqDxELv", client)
+
+        self.assertIn("ConnectTimeout", str(raised.exception))
+        self.assertIn("请稍后重试", str(raised.exception))
+        self.assertIn("https://b23.tv/aqDxELv", str(raised.exception))
+
+    async def test_short_link_failure_does_not_block_other_links(self):
+        def handler(request):
+            raise httpx.ConnectTimeout("", request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch("haruka_bot.video.bilibili.asyncio.sleep", AsyncMock()):
+                result = await resolve_video_references(
+                    "https://b23.tv/aqDxELv "
+                    "https://www.bilibili.com/video/BV1xx411c7mD",
+                    client,
+                )
+
         self.assertEqual([reference.key for reference in result], [("BV1xx411c7mD", 1)])
 
     async def test_unrecognized_link_error_contains_url(self):

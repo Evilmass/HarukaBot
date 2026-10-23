@@ -19,6 +19,13 @@ from .models import DEFAULT_USER_AGENT, DownloadedVideo, VideoError, VideoSettin
 
 VIDEO_HOSTS = {"bilibili.com", "www.bilibili.com", "m.bilibili.com"}
 SHORT_HOSTS = {"b23.tv", "b23.wtf", "bili2233.cn"}
+# 某个短链域名连接失败时，用同一个短链代码尝试 B 站的其他短链域名。
+SHORT_HOST_FALLBACKS = {
+    "b23.tv": ("bili2233.cn",),
+    "bili2233.cn": ("b23.tv",),
+}
+SHORT_REQUEST_ATTEMPTS = 2
+SHORT_REQUEST_TIMEOUT = httpx.Timeout(15.0, connect=10.0)
 # 消息里的链接可能缺少协议头，同时避免匹配到更长域名中的同名片段。
 _URL_PREFIX = r"(?<![A-Za-z0-9._/-])(?:https?://)?"
 _URL_SUFFIX = r"[0-9A-Za-z?&=_%./:+~#@-]*"
@@ -42,6 +49,10 @@ API_PLAYURL = "https://api.bilibili.com/x/player/playurl"
 
 class BiliVideoError(VideoError):
     """可展示给用户的 B 站视频错误。"""
+
+
+class BiliShortLinkError(BiliVideoError):
+    """短链请求遇到网络错误，稍后可以重试。"""
 
 
 def _format_size(size: Optional[int]) -> str:
@@ -161,15 +172,39 @@ def _reference_from_redirect_page(text: str, base_url: str) -> Optional[VideoRef
     return None
 
 
+def _describe_error(error: BaseException) -> str:
+    """httpx 的超时异常消息常为空，此时至少记录异常类型。"""
+    detail = str(error).strip()
+    return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+
+
+def _short_link_candidates(url: str) -> List[str]:
+    parsed = httpx.URL(url)
+    candidates = [url]
+    for host in SHORT_HOST_FALLBACKS.get(parsed.host, ()):
+        candidate = str(parsed.copy_with(host=host))
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
 async def _request_short_url(url: str, client: httpx.AsyncClient) -> httpx.Response:
-    """请求短链本身；连接类错误重试一次。"""
-    for attempt in range(2):
-        try:
-            return await client.get(url, follow_redirects=False)
-        except httpx.TransportError:
-            if attempt:
-                raise
-            await asyncio.sleep(0.5)
+    """请求短链本身；连接类错误重试，并尝试备用短链域名。"""
+    last_error: Optional[httpx.TransportError] = None
+    for candidate in _short_link_candidates(url):
+        for attempt in range(SHORT_REQUEST_ATTEMPTS):
+            try:
+                return await client.get(
+                    candidate,
+                    follow_redirects=False,
+                    timeout=SHORT_REQUEST_TIMEOUT,
+                )
+            except httpx.TransportError as error:
+                last_error = error
+                if attempt + 1 < SHORT_REQUEST_ATTEMPTS:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
     raise RuntimeError("短链接请求未返回结果")
 
 
@@ -179,7 +214,8 @@ async def _expand_short_url(
     """展开 B 站短链接。
 
     只读取跳转响应头，不请求跳转后的 B 站页面，因此目标页面返回
-    412/404 或响应缓慢时仍能识别视频。
+    412/404 或响应缓慢时仍能识别视频。网络错误会抛出
+    :class:`BiliShortLinkError`，链接有效但目标不是视频时返回 ``None``。
     """
     current = _normalize_url(url)
     for _ in range(MAX_SHORT_REDIRECTS):
@@ -192,8 +228,12 @@ async def _expand_short_url(
         try:
             response = await _request_short_url(current, client)
         except httpx.HTTPError as error:
-            logger.warning(f"无法展开 B 站短链接 {current}: {error}")
-            return None
+            logger.warning(
+                f"无法展开 B 站短链接 {current}: {_describe_error(error)}"
+            )
+            raise BiliShortLinkError(
+                f"B 站短链接请求失败（{_describe_error(error)}），请稍后重试：{current}"
+            ) from error
 
         reference = parse_video_url(str(response.url))
         if reference is not None:
@@ -223,16 +263,28 @@ async def _expand_short_url(
 async def resolve_video_references(
     text: str, client: httpx.AsyncClient
 ) -> List[VideoReference]:
-    """解析消息中的链接，并展开 b23 等 B 站短链接。"""
+    """解析消息中的链接，并展开 b23 等 B 站短链接。
+
+    单个短链网络失败不影响同消息里的其他链接；若最终没有任何可用
+    链接且存在网络失败，则抛出 :class:`BiliShortLinkError`。
+    """
     references: List[VideoReference] = []
     seen = set()
+    failure: Optional[BiliShortLinkError] = None
     for url in extract_message_urls(text):
         reference = parse_video_url(url)
         if reference is None:
-            reference = await _expand_short_url(url, client)
+            try:
+                reference = await _expand_short_url(url, client)
+            except BiliShortLinkError as error:
+                # 同一消息里可能还有其他可用链接，先记录下来继续处理。
+                failure = failure or error
+                continue
         if reference is not None and reference.key not in seen:
             seen.add(reference.key)
             references.append(reference)
+    if not references and failure is not None:
+        raise failure
     return references
 
 
