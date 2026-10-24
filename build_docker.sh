@@ -1,4 +1,5 @@
 #!/bin/sh
 set -eu
 
-docker compose up --build --detach
+git pull
+docker compose up --build --force-recreate --detach
