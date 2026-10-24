@@ -1,12 +1,20 @@
 import time
 
+from bilireq.exceptions import ResponseCodeError
 from bilireq.live import get_rooms_info_by_uids
+from httpx import HTTPError
 from nonebot.adapters.onebot.v11.message import MessageSegment
 from nonebot.log import logger
 
 from ...config import plugin_config
 from ...database import DB as db
-from ...utils import PROXIES, calc_time_total, safe_send, scheduler
+from ...utils import (
+    PROXIES,
+    calc_time_total,
+    describe_http_error,
+    safe_send,
+    scheduler,
+)
 
 status = {}
 live_time = {}
@@ -31,7 +39,12 @@ async def live_sched():
             status.pop(uid, None)
             live_time.pop(uid, None)
     logger.debug(f"爬取直播列表，目前开播{sum(status.values())}人，总共{len(uids)}人")
-    res = await get_rooms_info_by_uids(uids, reqtype="web", proxies=PROXIES)
+    try:
+        res = await get_rooms_info_by_uids(uids, reqtype="web", proxies=PROXIES)
+    except (HTTPError, ResponseCodeError) as error:
+        # 网络抖动时不中断任务，下个轮询继续
+        logger.warning(f"爬取直播列表失败，将在下个轮询中重试：{describe_http_error(error)}")
+        return
     if not res:
         return
 

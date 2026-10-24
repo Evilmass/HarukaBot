@@ -86,6 +86,35 @@ Linux 系统下，Playwright 需要安装额外的依赖才能运行 Chromium。
 
 如果该问题频繁出现请检查当前网络环境，如网络是否通畅，有没有与代理软件冲突。
 
+### 日志中出现 `爬取直播列表失败 ...` 或 `ConnectTimeout`
+
+表示本轮请求 B站 超时，这一轮直播状态刷新会被跳过，下个
+`HARUKA_LIVE_INTERVAL` 自动重试，通常不需要手动处理。
+
+容器刚启动后的第一轮更容易遇到：只有 cookie 缓存为空时才会请求
+`data.bilibili.com`，此时网络尚未就绪就会超时，之后会恢复正常。
+
+如果频繁出现，可以依次确认：
+
+1. 容器是否在反复重启：`docker inspect qqbot --format '{{.State.StartedAt}} {{.RestartCount}}'`
+2. 是否在同时转发大视频：上行占满时新建连接容易超时，可适当调大 `HARUKA_LIVE_INTERVAL`
+3. 容器内是否可访问 B站 API：
+
+```bash
+docker exec -it qqbot python -c "import httpx; print(httpx.get('https://api.live.bilibili.com/room/v1/Room/get_info?room_id=1', timeout=10).status_code)"
+```
+
+::: tip
+浏览器直接访问 `https://data.bilibili.com/v/` 返回 403 是正常现象，这个地址
+只用来读取 cookie，不影响推送。
+:::
+
+### 日志中出现 `推送失败（permission_denied）`
+
+这一条来自 QQ 协议端（NapCat/go-cqhttp）拒绝发送，不是 B站 的网络问题。
+错误信息里会带上协议端返回的 `retcode` 和原始描述，例如图片下载失败、
+被禁言、群号不存在等，请按提示排查。
+
 ## 机器人不发消息也没反应
 
 1. 检查 HarukaBot 与 go-cqhttp 连接是否正确。正常情况下 HarukaBot 的日志框中会显示接收到的 QQ消息。

@@ -12,6 +12,7 @@ nonebot.init()
 nonebot.load_plugin("nonebot_plugin_guild_patch")
 
 from haruka_bot.config import Config, plugin_config
+from haruka_bot.video import bilibili
 from haruka_bot.video.service import video_service
 from haruka_bot.video.bilibili import (
     BiliShortLinkError,
@@ -241,6 +242,24 @@ class BiliVideoUrlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("ConnectTimeout", str(raised.exception))
         self.assertIn("请稍后重试", str(raised.exception))
+        self.assertIn("https://b23.tv/aqDxELv", str(raised.exception))
+
+    async def test_short_link_deadline_bounds_total_time(self):
+        async def hanging_request(*args, **kwargs):
+            await asyncio.sleep(10)
+
+        async with httpx.AsyncClient() as client:
+            with patch.object(
+                bilibili, "SHORT_LINK_DEADLINE", 0.01
+            ), patch.object(
+                bilibili,
+                "_request_short_url",
+                new=hanging_request,
+            ):
+                with self.assertRaises(BiliShortLinkError) as raised:
+                    await resolve_video_references("https://b23.tv/aqDxELv", client)
+
+        self.assertIn("超时", str(raised.exception))
         self.assertIn("https://b23.tv/aqDxELv", str(raised.exception))
 
     async def test_short_link_failure_does_not_block_other_links(self):

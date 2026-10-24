@@ -243,6 +243,15 @@ def calc_time_total(t):
     return total
 
 
+def describe_http_error(error: BaseException) -> str:
+    """httpx 的异常信息常为空，补充异常类型和请求地址便于定位。"""
+    detail = str(error).strip()
+    if detail:
+        return f"{type(error).__name__}: {detail}"
+    url = getattr(getattr(error, "request", None), "url", None)
+    return f"{type(error).__name__}: {url}" if url else type(error).__name__
+
+
 @dataclass
 class SendResult:
     success: bool
@@ -290,15 +299,38 @@ async def safe_send(
         if isinstance(error, LookupError):
             return SendResult(False, "target_not_found", "通知目标不存在", attempted_bot_id)
         if isinstance(error, NetworkError):
-            return SendResult(False, "network_error", "机器人网络连接失败", attempted_bot_id)
+            detail = getattr(error, "msg", None)
+            return SendResult(
+                False,
+                "network_error",
+                f"机器人网络连接失败{f'（{detail}）' if detail else ''}",
+                attempted_bot_id,
+            )
         if isinstance(error, ActionFailed):
             info = getattr(error, "info", {}) or {}
-            api_message = str(info.get("msg") or "")
+            # 不同协议端分别使用 message 与 msg 字段
+            api_message = str(info.get("message") or info.get("msg") or "")
+            wording = str(info.get("wording") or "")
             if api_message in ("GROUP_NOT_FOUND", "CHANNEL_NOT_FOUND"):
                 return SendResult(False, "target_not_found", "通知目标不存在", attempted_bot_id)
-            if api_message == "SEND_MSG_API_ERROR":
+            if api_message == "SEND_MSG_API_ERROR" or wording == "SEND_MSG_API_ERROR":
                 return SendResult(False, "risk_control", "账号可能被风控", attempted_bot_id)
-            return SendResult(False, "permission_denied", "机器人权限不足或接口拒绝", attempted_bot_id)
+            retcode = info.get("retcode")
+            detail = "：".join(
+                part
+                for part in (
+                    f"retcode={retcode}" if retcode is not None else "",
+                    api_message or wording,
+                )
+                if part
+            )
+            return SendResult(
+                False,
+                "permission_denied",
+                f"协议端拒绝发送{f'（{detail}）' if detail else ''}",
+                attempted_bot_id,
+                info,
+            )
         return SendResult(False, "unknown_error", "未知发送错误", attempted_bot_id)
 
     outgoing_message = (

@@ -13,6 +13,7 @@ from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 from nonebot.log import logger
 
 from ..config import plugin_config
+from ..utils import describe_http_error
 from .download import download_file, media_stream
 from .messages import message_search_text
 from .models import DEFAULT_USER_AGENT, DownloadedVideo, VideoError, VideoSettings
@@ -25,7 +26,9 @@ SHORT_HOST_FALLBACKS = {
     "bili2233.cn": ("b23.tv",),
 }
 SHORT_REQUEST_ATTEMPTS = 2
-SHORT_REQUEST_TIMEOUT = httpx.Timeout(15.0, connect=10.0)
+SHORT_REQUEST_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+# 单条短链（含重试、备用域名与多跳）的总时限，避免一条链接卡住几十秒。
+SHORT_LINK_DEADLINE = 15.0
 # 消息里的链接可能缺少协议头，同时避免匹配到更长域名中的同名片段。
 _URL_PREFIX = r"(?<![A-Za-z0-9._/-])(?:https?://)?"
 _URL_SUFFIX = r"[0-9A-Za-z?&=_%./:+~#@-]*"
@@ -172,12 +175,6 @@ def _reference_from_redirect_page(text: str, base_url: str) -> Optional[VideoRef
     return None
 
 
-def _describe_error(error: BaseException) -> str:
-    """httpx 的超时异常消息常为空，此时至少记录异常类型。"""
-    detail = str(error).strip()
-    return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
-
-
 def _short_link_candidates(url: str) -> List[str]:
     parsed = httpx.URL(url)
     candidates = [url]
@@ -211,6 +208,22 @@ async def _request_short_url(url: str, client: httpx.AsyncClient) -> httpx.Respo
 async def _expand_short_url(
     url: str, client: httpx.AsyncClient
 ) -> Optional[VideoReference]:
+    """展开短链；超过总时限时按网络失败处理。"""
+    try:
+        return await asyncio.wait_for(
+            _expand_short_url_impl(url, client),
+            timeout=SHORT_LINK_DEADLINE,
+        )
+    except asyncio.TimeoutError as error:
+        logger.warning(f"无法展开 B 站短链接 {url}: 超过 {SHORT_LINK_DEADLINE:g} 秒")
+        raise BiliShortLinkError(
+            f"B 站短链接请求超时，请稍后重试：{url}"
+        ) from error
+
+
+async def _expand_short_url_impl(
+    url: str, client: httpx.AsyncClient
+) -> Optional[VideoReference]:
     """展开 B 站短链接。
 
     只读取跳转响应头，不请求跳转后的 B 站页面，因此目标页面返回
@@ -229,10 +242,10 @@ async def _expand_short_url(
             response = await _request_short_url(current, client)
         except httpx.HTTPError as error:
             logger.warning(
-                f"无法展开 B 站短链接 {current}: {_describe_error(error)}"
+                f"无法展开 B 站短链接 {current}: {describe_http_error(error)}"
             )
             raise BiliShortLinkError(
-                f"B 站短链接请求失败（{_describe_error(error)}），请稍后重试：{current}"
+                f"B 站短链接请求失败（{describe_http_error(error)}），请稍后重试：{current}"
             ) from error
 
         reference = parse_video_url(str(response.url))

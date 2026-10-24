@@ -638,6 +638,35 @@ class RoomResolverTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SendResultTests(unittest.IsolatedAsyncioTestCase):
+    async def test_action_failed_keeps_protocol_detail(self):
+        from nonebot.adapters.onebot.v11.exception import ActionFailed
+
+        failing_bot = SimpleNamespace(
+            call_api=AsyncMock(
+                side_effect=ActionFailed(
+                    status="failed",
+                    retcode=1200,
+                    data=None,
+                    message="图片下载失败",
+                )
+            )
+        )
+        with patch(
+            "haruka_bot.utils.nonebot.get_bots",
+            return_value={"3001": failing_bot},
+        ):
+            result = await safe_send(
+                bot_id=3001,
+                send_type="group",
+                type_id=9001,
+                message="test",
+                allow_fallback=False,
+            )
+        self.assertFalse(result.success)
+        self.assertEqual(result.code, "permission_denied")
+        self.assertIn("retcode=1200", result.message)
+        self.assertIn("图片下载失败", result.message)
+
     async def test_strict_send_does_not_fallback(self):
         fallback_bot = SimpleNamespace(call_api=AsyncMock(return_value={"message_id": 1}))
         with patch(
