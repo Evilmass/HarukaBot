@@ -2,7 +2,7 @@ import time
 
 from bilireq.exceptions import ResponseCodeError
 from bilireq.live import get_rooms_info_by_uids
-from httpx import HTTPError
+from httpx import HTTPError, Timeout
 from nonebot.adapters.onebot.v11.message import MessageSegment
 from nonebot.log import logger
 
@@ -15,6 +15,10 @@ from ...utils import (
     safe_send,
     scheduler,
 )
+
+# httpcore 的 connect 预算包含 DNS 解析，实测解析偶发 4 秒级抖动，
+# 沿用默认的 5 秒会随机超时。
+LIVE_REQUEST_TIMEOUT = Timeout(10.0, connect=10.0)
 
 status = {}
 live_time = {}
@@ -40,7 +44,12 @@ async def live_sched():
             live_time.pop(uid, None)
     logger.debug(f"爬取直播列表，目前开播{sum(status.values())}人，总共{len(uids)}人")
     try:
-        res = await get_rooms_info_by_uids(uids, reqtype="web", proxies=PROXIES)
+        res = await get_rooms_info_by_uids(
+            uids,
+            reqtype="web",
+            proxies=PROXIES,
+            timeout=LIVE_REQUEST_TIMEOUT,
+        )
     except (HTTPError, ResponseCodeError) as error:
         # 网络抖动时不中断任务，下个轮询继续
         logger.warning(f"爬取直播列表失败，将在下个轮询中重试：{describe_http_error(error)}")
