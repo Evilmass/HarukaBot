@@ -20,14 +20,8 @@ from .models import DEFAULT_USER_AGENT, DownloadedVideo, VideoError, VideoSettin
 
 VIDEO_HOSTS = {"bilibili.com", "www.bilibili.com", "m.bilibili.com"}
 SHORT_HOSTS = {"b23.tv", "b23.wtf", "bili2233.cn"}
-# 某个短链域名连接失败时，用同一个短链代码尝试 B 站的其他短链域名。
-SHORT_HOST_FALLBACKS = {
-    "b23.tv": ("bili2233.cn",),
-    "bili2233.cn": ("b23.tv",),
-}
-SHORT_REQUEST_ATTEMPTS = 2
 SHORT_REQUEST_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
-# 单条短链（含重试、备用域名与多跳）的总时限，避免一条链接卡住几十秒。
+# 单条短链（含多跳）的总时限，避免一条链接卡住几十秒。
 SHORT_LINK_DEADLINE = 15.0
 # 消息里的链接可能缺少协议头，同时避免匹配到更长域名中的同名片段。
 _URL_PREFIX = r"(?<![A-Za-z0-9._/-])(?:https?://)?"
@@ -150,61 +144,6 @@ def extract_message_urls(text: str) -> List[str]:
     return result
 
 
-HTML_REFRESH_RE = re.compile(
-    r"<meta[^>]+http-equiv=[\"']?refresh[\"']?[^>]*>", re.IGNORECASE,
-)
-HTML_REFRESH_URL_RE = re.compile(r"url=([^;\"'>\s]+)", re.IGNORECASE)
-HTML_SCRIPT_REDIRECT_RE = re.compile(
-    r"location(?:\.href|\.replace)?\s*(?:=\s*|\(\s*)[\"']([^\"']+)[\"']",
-    re.IGNORECASE,
-)
-
-
-def _reference_from_redirect_page(text: str, base_url: str) -> Optional[VideoReference]:
-    """从 HTML 跳转页里提取目标视频地址。"""
-    for meta in HTML_REFRESH_RE.finditer(text):
-        match = HTML_REFRESH_URL_RE.search(meta.group(0))
-        if match:
-            reference = parse_video_url(str(httpx.URL(base_url).join(match.group(1))))
-            if reference is not None:
-                return reference
-    for match in HTML_SCRIPT_REDIRECT_RE.finditer(text):
-        reference = parse_video_url(str(httpx.URL(base_url).join(match.group(1))))
-        if reference is not None:
-            return reference
-    return None
-
-
-def _short_link_candidates(url: str) -> List[str]:
-    parsed = httpx.URL(url)
-    candidates = [url]
-    for host in SHORT_HOST_FALLBACKS.get(parsed.host, ()):
-        candidate = str(parsed.copy_with(host=host))
-        if candidate not in candidates:
-            candidates.append(candidate)
-    return candidates
-
-
-async def _request_short_url(url: str, client: httpx.AsyncClient) -> httpx.Response:
-    """请求短链本身；连接类错误重试，并尝试备用短链域名。"""
-    last_error: Optional[httpx.TransportError] = None
-    for candidate in _short_link_candidates(url):
-        for attempt in range(SHORT_REQUEST_ATTEMPTS):
-            try:
-                return await client.get(
-                    candidate,
-                    follow_redirects=False,
-                    timeout=SHORT_REQUEST_TIMEOUT,
-                )
-            except httpx.TransportError as error:
-                last_error = error
-                if attempt + 1 < SHORT_REQUEST_ATTEMPTS:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("短链接请求未返回结果")
-
-
 async def _expand_short_url(
     url: str, client: httpx.AsyncClient
 ) -> Optional[VideoReference]:
@@ -239,7 +178,11 @@ async def _expand_short_url_impl(
             logger.warning(f"B 站短链接 {url} 跳转到了非视频页面：{current}")
             return None
         try:
-            response = await _request_short_url(current, client)
+            response = await client.get(
+                current,
+                follow_redirects=False,
+                timeout=SHORT_REQUEST_TIMEOUT,
+            )
         except httpx.HTTPError as error:
             logger.warning(
                 f"无法展开 B 站短链接 {current}: {describe_http_error(error)}"
@@ -248,27 +191,17 @@ async def _expand_short_url_impl(
                 f"B 站短链接请求失败（{describe_http_error(error)}），请稍后重试：{current}"
             ) from error
 
-        reference = parse_video_url(str(response.url))
+        location = response.headers.get("location")
+        if location is None:
+            # 短链不存在时 b23 会返回 200 的 JSON，这里同样没有跳转地址。
+            logger.warning(
+                f"B 站短链接 {current} 没有返回跳转地址（HTTP {response.status_code}）"
+            )
+            return None
+        current = str(response.url.join(location))
+        reference = parse_video_url(current)
         if reference is not None:
             return reference
-
-        location = response.headers.get("location")
-        if location:
-            current = str(response.url.join(location))
-            reference = parse_video_url(current)
-            if reference is not None:
-                return reference
-            continue
-        if response.is_success:
-            reference = _reference_from_redirect_page(response.text, current)
-            if reference is not None:
-                return reference
-            logger.warning(f"B 站短链接 {current} 返回的页面里没有视频地址")
-        else:
-            logger.warning(
-                f"无法展开 B 站短链接 {current}: HTTP {response.status_code}"
-            )
-        return None
     logger.warning(f"B 站短链接 {url} 跳转次数过多")
     return None
 
