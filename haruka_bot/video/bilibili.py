@@ -20,6 +20,7 @@ from .models import DEFAULT_USER_AGENT, DownloadedVideo, VideoError, VideoSettin
 
 VIDEO_HOSTS = {"bilibili.com", "www.bilibili.com", "m.bilibili.com"}
 SHORT_HOSTS = {"b23.tv", "b23.wtf", "bili2233.cn"}
+LIVE_HOSTS = {"live.bilibili.com"}
 SHORT_REQUEST_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # 单条短链（含多跳）的总时限，避免一条链接卡住几十秒。
 SHORT_LINK_DEADLINE = 15.0
@@ -172,10 +173,11 @@ async def _expand_short_url_impl(
     current = _normalize_url(url)
     for _ in range(MAX_SHORT_REDIRECTS):
         parsed = urlparse(current)
-        if parsed.scheme not in {"http", "https"} or (
-            (parsed.hostname or "").lower() not in SHORT_HOSTS
-        ):
-            logger.warning(f"B 站短链接 {url} 跳转到了非视频页面：{current}")
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme not in {"http", "https"} or host not in SHORT_HOSTS:
+            # 分享直播间、动态、番剧时同样会生成短链，这里按非视频链接忽略。
+            page = "直播间" if host in LIVE_HOSTS else "非视频页面"
+            logger.debug(f"B 站短链接 {url} 指向{page}，已忽略：{current}")
             return None
         try:
             response = await client.get(
@@ -211,6 +213,7 @@ async def resolve_video_references(
 ) -> List[VideoReference]:
     """解析消息中的链接，并展开 b23 等 B 站短链接。
 
+    指向直播间、动态等非视频页面的短链不会产生引用，也视为正常情况。
     单个短链网络失败不影响同消息里的其他链接；若最终没有任何可用
     链接且存在网络失败，则抛出 :class:`BiliShortLinkError`。
     """
@@ -776,10 +779,12 @@ class BiliVideoProvider:
         self.downloader.settings = settings
         self.downloader.max_bytes = settings.max_bytes
 
-    async def resolve(self, url: str) -> VideoReference:
+    async def resolve(self, url: str) -> Optional[VideoReference]:
+        """解析链接；短链指向直播间等非视频页面时返回 ``None`` 交由调用方忽略。"""
         references = await resolve_video_references(url, self.downloader.client)
         if not references:
-            raise BiliVideoError(f"无法识别该 B 站视频链接：{url}")
+            logger.debug(f"B 站链接不是视频作品，已忽略：{url}")
+            return None
         reference = references[0]
         # av 和 BV 链接指向同一作品时，也应按作品而非链接去重。
         if reference.aid is not None:

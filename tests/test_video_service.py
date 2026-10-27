@@ -334,6 +334,21 @@ class VideoServiceTests(unittest.IsolatedAsyncioTestCase):
         self.bot.send_group_forward_msg.assert_not_awaited()
         self.assertEqual(self.downloads, [])
 
+    async def test_non_video_short_link_is_ignored_silently(self):
+        """短链指向直播间等非视频页面时不提示，也不占用处理数量上限。"""
+        await self.service.handle(self.bot, event(
+            "https://b23.tv/liveroom https://www.bilibili.com/video/BV1xx411c7mD"
+        ))
+        self.assertEqual(len(self.downloads), 1)
+        self.assertEqual(self.bot.send_group_forward_msg.await_count, 1)
+        self.assertEqual(self.bot.send_group_msg.await_count, 1)
+        self.assertIn("正在处理", self.bot.send_group_msg.await_args.kwargs["message"])
+
+        self.bot.reset_mock()
+        await self.service.handle(self.bot, event("https://b23.tv/liveroom"))
+        self.bot.send_group_msg.assert_not_awaited()
+        self.bot.send_group_forward_msg.assert_not_awaited()
+
     async def test_failure_does_not_stop_other_platform_and_cleans_job(self):
         self.bot.send_group_forward_msg.side_effect = [RuntimeError("send failed"), None]
         await self.service.handle(self.bot, event(

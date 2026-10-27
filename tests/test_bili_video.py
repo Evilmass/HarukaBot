@@ -184,6 +184,23 @@ class BiliVideoUrlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, [])
 
+    async def test_short_link_to_live_room_is_ignored(self):
+        """分享直播间生成的短链跳转到直播页，不应被当成视频或请求失败。"""
+
+        def handler(request):
+            return httpx.Response(
+                302,
+                headers={
+                    "Location": "https://live.bilibili.com/1747547212?share_source=QQ",
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = BiliVideoProvider(
+                client, VideoSettings(None, 90, 3, 2, "ffmpeg", 30),
+            )
+            self.assertIsNone(await provider.resolve("https://b23.tv/CXomHMT"))
+
     async def test_short_link_transport_failure_is_reported(self):
         def handler(request):
             raise httpx.ConnectTimeout("", request=request)
@@ -227,14 +244,13 @@ class BiliVideoUrlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([reference.key for reference in result], [("BV1xx411c7mD", 1)])
 
-    async def test_unrecognized_link_error_contains_url(self):
+    async def test_unrecognized_link_returns_none(self):
         transport = httpx.MockTransport(lambda request: httpx.Response(404))
         async with httpx.AsyncClient(transport=transport) as client:
             provider = BiliVideoProvider(
                 client, VideoSettings(None, 90, 3, 2, "ffmpeg", 30),
             )
-            with self.assertRaisesRegex(BiliVideoError, "https://b23.tv/aqDxELv"):
-                await provider.resolve("https://b23.tv/aqDxELv")
+            self.assertIsNone(await provider.resolve("https://b23.tv/aqDxELv"))
 
 
 class BiliVideoStreamTests(unittest.TestCase):

@@ -159,8 +159,7 @@ class VideoService:
                 self.store.remove(task_id)
         return True
 
-    async def _process(self, provider, platform, url, bot, event, seen) -> bool:
-        reference = await provider.resolve(url)
+    async def _process(self, provider, platform, reference, bot, event, seen) -> bool:
         key = (platform, *reference.key)
         if key in seen:
             return False
@@ -196,10 +195,10 @@ class VideoService:
         current = asyncio.current_task()
         self.handlers.add(current)
         try:
-            await self._notify(bot, event, "检测到视频链接，正在处理……")
             providers: Dict[str, object] = {}
             seen = set()
             processed = 0
+            notified = False
             async with AsyncExitStack() as stack:
                 for platform, url in candidates:
                     if processed >= self.settings.max_links:
@@ -209,9 +208,25 @@ class VideoService:
                         async with self.semaphore:
                             if platform not in providers:
                                 providers[platform] = await self._provider(platform, stack)
+                            provider = providers[platform]
+                            # 解析与下载共用一个总时限，保持单个作品的总超时设置。
+                            loop = asyncio.get_running_loop()
+                            deadline = loop.time() + self.settings.timeout
+                            reference = await asyncio.wait_for(
+                                provider.resolve(url), timeout=self.settings.timeout,
+                            )
+                            if reference is None:
+                                # 直播间、动态等非视频链接直接跳过，不占用处理数量上限。
+                                logger.debug(f"[{name}视频] 链接不是视频作品，已忽略：{url}")
+                                continue
+                            if not notified:
+                                notified = True
+                                await self._notify(bot, event, "检测到视频链接，正在处理……")
                             consumed = await asyncio.wait_for(
-                                self._process(providers[platform], platform, url, bot, event, seen),
-                                timeout=self.settings.timeout,
+                                self._process(
+                                    provider, platform, reference, bot, event, seen,
+                                ),
+                                timeout=max(deadline - loop.time(), 0),
                             )
                             processed += int(consumed)
                     except VideoError as error:
