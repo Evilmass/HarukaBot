@@ -1,5 +1,6 @@
 import asyncio
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ nonebot.load_plugin("nonebot_plugin_guild_patch")
 
 from haruka_bot.config import Config, plugin_config
 from haruka_bot.video import bilibili
+from haruka_bot.video.download import download_file
 from haruka_bot.video.service import video_service
 from haruka_bot.video.bilibili import (
     BiliShortLinkError,
@@ -354,6 +356,59 @@ class BiliVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(size, 5)
             self.assertEqual(target.read_bytes(), b"video")
+
+    async def test_mcdn_stream_prefers_official_mirrors(self):
+        async with httpx.AsyncClient() as client:
+            downloader = BiliVideoDownloader(client)
+            urls = downloader._candidate_urls(
+                {
+                    "baseUrl": (
+                        "https://xy1.mcdn.bilivideo.cn/upgcxcode/video.m4s"
+                    ),
+                    "backupUrl": [
+                        "https://upos-sz-mirrorcos.bilivideo.com/"
+                        "upgcxcode/video.m4s"
+                    ],
+                }
+            )
+        self.assertEqual(
+            urls[0],
+            "https://upos-sz-mirrorali.bilivideo.com/upgcxcode/video.m4s",
+        )
+        self.assertEqual(
+            urls[-1],
+            "https://xy1.mcdn.bilivideo.cn/upgcxcode/video.m4s",
+        )
+
+    async def test_download_passes_read_timeout_to_request(self):
+        seen = {}
+
+        def handler(request):
+            seen["timeout"] = request.extensions.get("timeout")
+            return httpx.Response(
+                206,
+                headers={
+                    "content-length": "5",
+                    "content-range": "bytes 0-4/5",
+                },
+                content=b"video",
+            )
+
+        timeout = httpx.Timeout(5, connect=1, read=0.1)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "video.mp4"
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                await download_file(
+                    client,
+                    "https://cdn.example/video",
+                    target,
+                    1000,
+                    {},
+                    timeout=timeout,
+                )
+        self.assertEqual(seen["timeout"], timeout.as_dict())
 
     async def test_size_probe_uses_single_byte_range(self):
         async def handler(request):

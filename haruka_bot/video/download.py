@@ -12,11 +12,14 @@ from .models import VideoError, VideoTooLarge
 @asynccontextmanager
 async def media_stream(
     client: httpx.AsyncClient, url: str, headers: Dict[str, str],
-    byte_range: str = "bytes=0-",
+    byte_range: str = "bytes=0-", timeout: Optional[httpx.Timeout] = None,
 ):
     """每次重定向都移除 Cookie，避免复用 API 客户端时泄露登录凭据。"""
     for _ in range(11):
-        request = client.build_request("GET", url, headers={**headers, "Range": byte_range})
+        request_kwargs = {"timeout": timeout} if timeout is not None else {}
+        request = client.build_request(
+            "GET", url, headers={**headers, "Range": byte_range}, **request_kwargs
+        )
         request.headers.pop("cookie", None)
         response = await client.send(request, stream=True, follow_redirects=False)
         if response.has_redirect_location:
@@ -37,13 +40,15 @@ async def media_stream(
 async def download_file(
     client: httpx.AsyncClient, url: str, target: Path, max_bytes: int,
     headers: Dict[str, str], *, require_mp4: bool = False,
-    scope: str = "[视频下载]",
+    scope: str = "[视频下载]", timeout: Optional[httpx.Timeout] = None,
+    progress_interval: int = 0,
 ) -> int:
     started = time.perf_counter()
     size = 0
     prefix = b""
+    next_progress = progress_interval
     try:
-        async with media_stream(client, url, headers) as response:
+        async with media_stream(client, url, headers, timeout=timeout) as response:
             response.raise_for_status()
             content_length = int(response.headers.get("content-length", 0))
             if content_length > max_bytes:
@@ -63,6 +68,11 @@ async def download_file(
                     if require_mp4 and len(prefix) == 64 and b"ftyp" not in prefix:
                         raise VideoError("视频地址没有返回有效的 MP4 文件")
                     output.write(chunk)
+                    if next_progress and size >= next_progress:
+                        logger.info(
+                            f"{scope} 已下载 {size / 1024 / 1024:.1f} MB"
+                        )
+                        next_progress += progress_interval
             if not size or (require_mp4 and b"ftyp" not in prefix):
                 raise VideoError("视频地址没有返回有效的 MP4 文件")
             if content_length and size != content_length:

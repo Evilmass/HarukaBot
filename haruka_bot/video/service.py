@@ -56,6 +56,10 @@ async def send_video(
         raise VideoTooLarge(f"视频文件超过 {settings.max_size_mb} MB 限制")
     relative = store.register(task_id, video.path)
     video_url = f"{settings.public_base_url.rstrip('/')}{relative}"
+    logger.info(
+        f"[{PLATFORM_NAMES[video.platform]}视频][{video.video_id}] "
+        f"开始发送合并转发：{size / 1024 / 1024:.1f} MB"
+    )
     nodes = [
         {"type": "node", "data": {
             "name": "HarukaBot", "uin": bot.self_id, "content": video.description,

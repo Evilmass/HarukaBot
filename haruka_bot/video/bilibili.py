@@ -24,6 +24,12 @@ LIVE_HOSTS = {"live.bilibili.com"}
 SHORT_REQUEST_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # 单条短链（含多跳）的总时限，避免一条链接卡住几十秒。
 SHORT_LINK_DEADLINE = 15.0
+# 媒体流连续无数据超过该时间就放弃当前 CDN，避免 PCDN 节点卡住整个任务。
+MEDIA_READ_TIMEOUT = 60.0
+# 大小探测只用于选流，失败应尽快降级。
+MEDIA_PROBE_TIMEOUT = httpx.Timeout(15.0, connect=10.0, read=10.0)
+# 下载进度日志间隔，便于区分“下载慢”和“发送慢”。
+MEDIA_PROGRESS_INTERVAL = 10 * 1024 * 1024
 # 消息里的链接可能缺少协议头，同时避免匹配到更长域名中的同名片段。
 _URL_PREFIX = r"(?<![A-Za-z0-9._/-])(?:https?://)?"
 _URL_SUFFIX = r"[0-9A-Za-z?&=_%./:+~#@-]*"
@@ -354,6 +360,11 @@ def _stream_urls(stream: Dict[str, Any]) -> Iterable[str]:
             yield str(url)
 
 
+def _is_mcdn_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host.startswith("mcdn.") or ".mcdn." in host
+
+
 def get_dash_stream_candidates(
     play_data: Dict[str, Any], max_quality: int
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -464,52 +475,50 @@ class BiliVideoDownloader:
         if stream_kind:
             scope += f"[{stream_kind}]"
         last_error = "未知错误"
-        for url in _stream_urls(stream):
-            # 收集所有待尝试的 URL：原始 URL + 备用 CDN 镜像
-            urls_to_try = [url]
-            for fallback_host in self._CDN_FALLBACK_HOSTS:
-                fallback_url = self._replace_cdn_host(url, fallback_host)
-                if fallback_url != url and fallback_url not in urls_to_try:
-                    urls_to_try.append(fallback_url)
-
-            for attempt_url in urls_to_try:
-                size = 0
-                attempt_started = time.perf_counter()
-                host = urlparse(attempt_url).hostname or "未知 CDN"
-                logger.info(f"{scope} 开始下载媒体流，CDN={host}")
-                try:
-                    # B 站的媒体 CDN 会拒绝不带 Range 的普通 GET 请求。
-                    size = await download_file(
-                        self.client, attempt_url, target, self.max_bytes,
-                        self._media_headers(referer), scope=scope,
-                    )
-                    elapsed = time.perf_counter() - attempt_started
-                    size_mb = size / 1024 / 1024
-                    speed = size_mb / elapsed if elapsed > 0 else 0
-                    logger.info(
-                        f"{scope} 媒体流下载完成："
-                        f"{size_mb:.1f} MB，耗时 {elapsed:.2f} 秒，"
-                        f"平均 {speed:.1f} MB/s，CDN={host}"
-                    )
-                    return size
-                except VideoError as error:
-                    target.unlink(missing_ok=True)
-                    raise BiliVideoError(str(error)) from error
-                except (httpx.HTTPError, OSError, ValueError) as error:
-                    if isinstance(error, httpx.HTTPStatusError):
-                        host = error.request.url.host
-                        last_error = f"HTTP {error.response.status_code}（{host}）"
-                    else:
-                        last_error = type(error).__name__
-                    elapsed = time.perf_counter() - attempt_started
-                    logger.warning(
-                        f"{scope} 媒体流下载尝试失败："
-                        f"{last_error}，耗时 {elapsed:.2f} 秒，CDN={host}"
-                    )
-                    target.unlink(missing_ok=True)
+        for attempt_url in self._candidate_urls(stream):
+            size = 0
+            attempt_started = time.perf_counter()
+            host = urlparse(attempt_url).hostname or "未知 CDN"
+            logger.info(f"{scope} 开始下载媒体流，CDN={host}")
+            try:
+                # B 站的媒体 CDN 会拒绝不带 Range 的普通 GET 请求。
+                size = await download_file(
+                    self.client, attempt_url, target, self.max_bytes,
+                    self._media_headers(referer), scope=scope,
+                    timeout=httpx.Timeout(
+                        self.settings.timeout,
+                        connect=20,
+                        read=min(MEDIA_READ_TIMEOUT, self.settings.timeout),
+                    ),
+                    progress_interval=MEDIA_PROGRESS_INTERVAL,
+                )
+                elapsed = time.perf_counter() - attempt_started
+                size_mb = size / 1024 / 1024
+                speed = size_mb / elapsed if elapsed > 0 else 0
+                logger.info(
+                    f"{scope} 媒体流下载完成："
+                    f"{size_mb:.1f} MB，耗时 {elapsed:.2f} 秒，"
+                    f"平均 {speed:.1f} MB/s，CDN={host}"
+                )
+                return size
+            except VideoError as error:
+                target.unlink(missing_ok=True)
+                raise BiliVideoError(str(error)) from error
+            except (httpx.HTTPError, OSError, ValueError) as error:
+                if isinstance(error, httpx.HTTPStatusError):
+                    host = error.request.url.host
+                    last_error = f"HTTP {error.response.status_code}（{host}）"
+                else:
+                    last_error = type(error).__name__
+                elapsed = time.perf_counter() - attempt_started
+                logger.warning(
+                    f"{scope} 媒体流下载尝试失败："
+                    f"{last_error}，耗时 {elapsed:.2f} 秒，CDN={host}"
+                )
+                target.unlink(missing_ok=True)
         raise BiliVideoError(f"下载 B 站媒体流失败：{last_error}")
 
-    # 当主 CDN 返回 403 时可尝试的备用镜像域名
+    # 官方备用镜像；mcdn 等 P2P 节点不稳定时优先使用。
     _CDN_FALLBACK_HOSTS = [
         "upos-sz-mirrorali.bilivideo.com",
         "upos-sz-mirrorhw.bilivideo.com",
@@ -522,17 +531,35 @@ class BiliVideoDownloader:
         import re as _re
 
         return _re.sub(
-            r"https?://[^/]+\.bilivideo\.com/",
+            r"https?://[^/]+\.bilivideo\.(?:com|cn)/",
             f"https://{new_host}/",
             url,
             count=1,
         )
 
+    def _candidate_urls(self, stream: Dict[str, Any]) -> List[str]:
+        """收集原始地址、镜像与备份地址；mcdn P2P 节点排在最后。"""
+        urls: List[str] = []
+        for url in _stream_urls(stream):
+            candidates = [url]
+            candidates.extend(
+                self._replace_cdn_host(url, host)
+                for host in self._CDN_FALLBACK_HOSTS
+            )
+            for candidate in candidates:
+                if candidate not in urls:
+                    urls.append(candidate)
+        return sorted(urls, key=_is_mcdn_url)
+
     @asynccontextmanager
-    async def _media_stream(self, url: str, byte_range: str, referer: str):
+    async def _media_stream(
+        self, url: str, byte_range: str, referer: str,
+        timeout: Optional[httpx.Timeout] = None,
+    ):
         """使用视频页 Referer 访问 CDN，且不向 CDN 发送登录 Cookie。"""
         async with media_stream(
-            self.client, url, self._media_headers(referer), byte_range
+            self.client, url, self._media_headers(referer), byte_range,
+            timeout=timeout,
         ) as response:
             yield response
 
@@ -549,30 +576,24 @@ class BiliVideoDownloader:
         self, stream: Dict[str, Any], referer: str
     ) -> Optional[int]:
         """通过单字节 Range 请求获取媒体流的完整大小。"""
-        for url in _stream_urls(stream):
-            urls_to_try = [url]
-            for fallback_host in self._CDN_FALLBACK_HOSTS:
-                fallback_url = self._replace_cdn_host(url, fallback_host)
-                if fallback_url != url and fallback_url not in urls_to_try:
-                    urls_to_try.append(fallback_url)
-
-            for attempt_url in urls_to_try:
-                try:
-                    async with self._media_stream(
-                        attempt_url, "bytes=0-0", referer
-                    ) as response:
-                        response.raise_for_status()
-                        content_range = response.headers.get("content-range", "")
-                        if "/" in content_range:
-                            total = content_range.rsplit("/", 1)[-1]
-                            if total.isdigit():
-                                return int(total)
-                        if response.status_code == 200:
-                            content_length = response.headers.get("content-length")
-                            if content_length and content_length.isdigit():
-                                return int(content_length)
-                except (httpx.HTTPError, OSError, ValueError):
-                    continue
+        for attempt_url in self._candidate_urls(stream):
+            try:
+                async with self._media_stream(
+                    attempt_url, "bytes=0-0", referer,
+                    timeout=MEDIA_PROBE_TIMEOUT,
+                ) as response:
+                    response.raise_for_status()
+                    content_range = response.headers.get("content-range", "")
+                    if "/" in content_range:
+                        total = content_range.rsplit("/", 1)[-1]
+                        if total.isdigit():
+                            return int(total)
+                    if response.status_code == 200:
+                        content_length = response.headers.get("content-length")
+                        if content_length and content_length.isdigit():
+                            return int(content_length)
+            except (httpx.HTTPError, OSError, ValueError):
+                continue
         return None
 
     async def _select_fitting_dash_streams(
