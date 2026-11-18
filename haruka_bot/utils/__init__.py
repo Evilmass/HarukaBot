@@ -6,7 +6,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, FrozenSet, Optional, Union
 
 import httpx
 import nonebot
@@ -21,7 +21,11 @@ from nonebot.adapters.onebot.v11 import (
     MessageSegment,
     NetworkError,
 )
-from nonebot.adapters.onebot.v11.event import GroupMessageEvent, PrivateMessageEvent
+from nonebot.adapters.onebot.v11.event import (
+    Event,
+    GroupMessageEvent,
+    PrivateMessageEvent,
+)
 from nonebot.adapters.onebot.v11.permission import GROUP_ADMIN, GROUP_OWNER
 from nonebot.exception import FinishedException
 from nonebot.log import logger
@@ -31,6 +35,10 @@ from nonebot.permission import SUPERUSER, Permission
 from nonebot.rule import Rule
 
 from ..config import plugin_config
+from ..features import (
+    is_group_restricted as _is_group_restricted,
+    resolve_group_features,
+)
 
 require("nonebot_plugin_guild_patch")
 from nonebot_plugin_guild_patch import ChannelDestroyedNoticeEvent, GuildMessageEvent
@@ -222,6 +230,35 @@ def to_me():
     return Rule(_to_me)
 
 
+def group_features(group_id) -> FrozenSet[str]:
+    return resolve_group_features(
+        int(group_id),
+        plugin_config.haruka_group_features,
+        plugin_config.haruka_video_only_groups,
+    )
+
+
+def is_group_restricted(group_id) -> bool:
+    return _is_group_restricted(
+        int(group_id),
+        plugin_config.haruka_group_features,
+        plugin_config.haruka_video_only_groups,
+    )
+
+
+def group_feature_rule(feature: Optional[str]):
+    """群消息只有在启用对应功能时才放行；未声明功能的指令按受限群处理。"""
+
+    async def _check(event: Event) -> bool:
+        if not isinstance(event, GroupMessageEvent):
+            return True
+        if feature is None:
+            return not is_group_restricted(event.group_id)
+        return feature in group_features(event.group_id)
+
+    return Rule(_check)
+
+
 def calc_time_total(t):
     t = int(t * 1000)
     if t < 5000:
@@ -272,8 +309,18 @@ async def safe_send(
     cleanup_invalid_target=True,
     subscription_id=None,
     event_type="push",
+    feature: Optional[str] = None,
 ) -> SendResult:
     """Send a message and return a structured, non-raising delivery result."""
+    if (
+        send_type == "group"
+        and feature is not None
+        and feature not in group_features(type_id)
+    ):
+        logger.debug(f"群 {type_id} 未启用功能 {feature}，跳过推送")
+        return SendResult(
+            True, "skipped", f"群未启用功能 {feature}，已跳过推送", int(bot_id)
+        )
 
     async def _send_once(bot, outgoing_message):
         if send_type == "guild":
@@ -432,7 +479,13 @@ def on_startup():
 
 
 def on_command(cmd, *args, **kwargs):
-    return _on_command(plugin_config.haruka_command_prefix + cmd, *args, **kwargs)
+    feature = kwargs.pop("feature", None)
+    rule = kwargs.pop("rule", None)
+    group_rule = group_feature_rule(feature)
+    kwargs["rule"] = group_rule if rule is None else group_rule & rule
+    matcher = _on_command(plugin_config.haruka_command_prefix + cmd, *args, **kwargs)
+    matcher.haruka_feature = feature
+    return matcher
 
 
 PROXIES = {"all://": plugin_config.haruka_proxy}

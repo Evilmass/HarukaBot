@@ -134,5 +134,6 @@ async def live_sched():
                 at=bool(sets.at) if new_status else False,  # 下播不@全体
                 subscription_id=sets.id,
                 event_type="live_start" if new_status else "live_end",
+                feature="live",
             )
         await db.update_user(int(uid), name)

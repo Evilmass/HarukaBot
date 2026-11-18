@@ -10,6 +10,7 @@ update_user_live_room_id = on_command(
     aliases={"更新所有用户直播间信息"},
     rule=to_me(),
     priority=5,
+    feature="maintenance",
 )
 update_user_live_room_id.__doc__ = """更新所有用户直播间信息"""
 update_user_live_room_id.handle()(permission_check)
@@ -50,6 +51,7 @@ update_user_short_url = on_command(
     aliases={"更新所有用户直播间短链接"},
     rule=to_me(),
     priority=5,
+    feature="maintenance",
 )
 update_user_short_url.__doc__ = """更新所有用户直播间短链接"""
 update_user_short_url.handle()(permission_check)

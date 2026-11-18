@@ -237,6 +237,51 @@ HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 不再请求解析接口或重新下载；相同作品的并发请求只会实际下载一次。
 过期缓存和异常退出留下的不完整目录会在启动及运行期间自动清理。
 
+## HARUKA_GROUP_FEATURES
+
+默认值：`{}`
+
+按群启用功能的白名单，格式为 `{"群号": ["功能", ...]}`。未列出的群保留
+全部功能，列出的群只响应指定功能，其它指令会被静默忽略，相关推送也会跳过。
+功能值可以是 JSON 数组，也可以是逗号、空格分隔的字符串；`all` 表示全部功能，
+空数组表示该群不启用任何功能。
+
+| 功能 | 说明 |
+| --- | --- |
+| `video` | 群聊 B 站/抖音视频解析 |
+| `save_sticker` | `save` 保存表情包指令（别名 `save`） |
+| `sub` | 关注、取关、关注列表 |
+| `live` | 开启/关闭直播、已开播指令及开播/下播推送 |
+| `dynamic` | 开启/关闭动态指令及动态推送 |
+| `at` | 开启全体、关闭全体 |
+| `permission` | 开启权限、关闭权限 |
+| `live_duration` | 耐播王指令及每日榜单推送 |
+| `help` | 帮助指令（帮助内容也会按群功能过滤） |
+| `server_ip` | `ip` 联机地址指令（别名 `ip`） |
+| `maintenance` | 更新直播间信息、更新直播间短链接等维护指令 |
+| `all` | 全部功能（仅用于配置值） |
+
+```dotenv
+# 该群只保留视频解析和保存表情包；未列出的群保持全部功能
+HARUKA_GROUP_FEATURES={"123456789": ["video", "save_sticker"]}
+```
+
+也可以用 `"all"` 显式声明某个群保持全部功能，例如：
+
+```dotenv
+HARUKA_GROUP_FEATURES={"123456789": ["video", "save_sticker"], "987654321": "all"}
+```
+
+仅启用视频的群仍可使用快捷配置 `HARUKA_VIDEO_ONLY_GROUPS`；它等价于在
+`HARUKA_GROUP_FEATURES` 中给该群配置 `["video"]`。同一群同时出现在两处时，
+以 `HARUKA_GROUP_FEATURES` 为准。显式启用 `video` 且未配置平台白名单时，
+默认同时解析 B 站和抖音；如果群出现在 `HARUKA_BILI_VIDEO_GROUPS` 或
+`HARUKA_DOUYIN_VIDEO_GROUPS` 中，则只解析对应平台。
+
+```dotenv
+HARUKA_VIDEO_ONLY_GROUPS=[123456789]
+```
+
 ## 抖音视频配置
 
 | 配置 | 默认值 | 说明 |

@@ -4,12 +4,15 @@ from nonebot.adapters.onebot.v11 import Bot
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 from nonebot.rule import Rule
 
+from ..utils import group_features
 from ..video.files import VIDEO_SERVE_PREFIX
 from ..video.service import allowed_platforms, video_service
 
 
 async def _enabled_group(event: GroupMessageEvent) -> bool:
-    return bool(allowed_platforms(event.group_id))
+    return "video" in group_features(event.group_id) and bool(
+        allowed_platforms(event.group_id)
+    )
 
 
 video = on_message(rule=Rule(_enabled_group), priority=20, block=False)

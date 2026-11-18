@@ -18,6 +18,7 @@ face_extractor = on_command(
     aliases={"保存图片", "保存表情", "保存"},
     priority=10,
     block=True,
+    feature="save_sticker",
 )
 
 # TARGET_REDIRECT_URL = "https://pic.colanns.me"

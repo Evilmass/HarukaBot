@@ -684,6 +684,24 @@ class SendResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.code, "bot_offline")
         fallback_bot.call_api.assert_not_awaited()
 
+    async def test_group_feature_skips_push(self):
+        original = plugin_config.haruka_group_features
+        plugin_config.haruka_group_features = {9001: ["video"]}
+        try:
+            with patch("haruka_bot.utils.nonebot.get_bots", return_value={}) as get_bots:
+                result = await safe_send(
+                    bot_id=3001,
+                    send_type="group",
+                    type_id=9001,
+                    message="test",
+                    feature="live",
+                )
+        finally:
+            plugin_config.haruka_group_features = original
+        self.assertTrue(result.success)
+        self.assertEqual(result.code, "skipped")
+        get_bots.assert_not_called()
+
 
 class SubscriptionDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

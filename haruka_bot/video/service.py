@@ -12,6 +12,7 @@ from nonebot.adapters.onebot.v11.exception import NetworkError
 from nonebot.log import logger
 
 from ..config import Config, plugin_config
+from ..features import resolve_group_features
 from . import bilibili, douyin
 from .cache import VideoCache, link_or_copy
 from .files import VideoFileStore
@@ -27,6 +28,19 @@ def allowed_platforms(group_id: int, config: Config = plugin_config) -> Set[str]
         platforms.add("bilibili")
     if group_id in config.haruka_douyin_video_groups:
         platforms.add("douyin")
+    if platforms:
+        return platforms
+    # 显式启用 video 但未配置平台白名单时，默认解析两个平台。
+    explicit = (
+        group_id in (config.haruka_group_features or {})
+        or group_id in (config.haruka_video_only_groups or [])
+    )
+    if explicit and "video" in resolve_group_features(
+        group_id,
+        config.haruka_group_features,
+        config.haruka_video_only_groups,
+    ):
+        return {"bilibili", "douyin"}
     return platforms
 
 

@@ -12,6 +12,7 @@ import httpx
 import nonebot
 from fastapi import FastAPI, HTTPException
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
+from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 
 nonebot.init()
 
@@ -35,6 +36,63 @@ def event(text, group_id=123, user_id=42, message=None):
 
 def video(path, platform="douyin"):
     return DownloadedVideo(platform, "123", "标题", "作者", 65, "https://www.douyin.com/video/123", path)
+
+
+def group_event(group_id=123):
+    return GroupMessageEvent(
+        time=0,
+        self_id=1,
+        post_type="message",
+        sub_type="normal",
+        user_id=42,
+        message_type="group",
+        message_id=1,
+        message=Message("hi"),
+        original_message=Message("hi"),
+        raw_message="hi",
+        font=0,
+        sender={"user_id": 42},
+        to_me=False,
+        group_id=group_id,
+    )
+
+
+class GroupFeatureTests(unittest.TestCase):
+    def test_feature_allowlist_and_legacy_video_only_groups(self):
+        from haruka_bot.config import plugin_config
+        from haruka_bot.features import ALL_FEATURES
+        from haruka_bot.utils import group_feature_rule, group_features
+
+        old_map = plugin_config.haruka_group_features
+        old_video = plugin_config.haruka_video_only_groups
+        try:
+            plugin_config.haruka_group_features = {123: ["video", "save_sticker"]}
+            plugin_config.haruka_video_only_groups = [123, 456]
+            self.assertEqual(
+                group_features(123), frozenset({"video", "save_sticker"})
+            )
+            self.assertEqual(group_features(456), frozenset({"video"}))
+            self.assertEqual(group_features(789), ALL_FEATURES)
+
+            self.assertTrue(
+                asyncio.run(
+                    group_feature_rule("save_sticker")(
+                        None, group_event(123), {}
+                    )
+                )
+            )
+            self.assertFalse(
+                asyncio.run(group_feature_rule("live")(None, group_event(123), {}))
+            )
+            self.assertTrue(
+                asyncio.run(group_feature_rule(None)(None, group_event(789), {}))
+            )
+            self.assertFalse(
+                asyncio.run(group_feature_rule(None)(None, group_event(456), {}))
+            )
+        finally:
+            plugin_config.haruka_group_features = old_map
+            plugin_config.haruka_video_only_groups = old_video
 
 
 class VideoConfigTests(unittest.TestCase):
@@ -66,6 +124,26 @@ class VideoConfigTests(unittest.TestCase):
         self.assertEqual(allowed_platforms(123, config), {"bilibili"})
         self.assertEqual(allowed_platforms(456, config), {"douyin"})
         self.assertEqual(allowed_platforms(789, config), set())
+
+        feature_config = Config(haruka_group_features={789: ["video"]})
+        self.assertEqual(
+            allowed_platforms(789, feature_config), {"bilibili", "douyin"}
+        )
+        self.assertEqual(
+            allowed_platforms(789, Config(haruka_video_only_groups=[789])),
+            {"bilibili", "douyin"},
+        )
+        limited = Config(
+            haruka_group_features={789: ["video"]},
+            haruka_bili_video_groups=[789],
+        )
+        self.assertEqual(allowed_platforms(789, limited), {"bilibili"})
+        self.assertEqual(
+            allowed_platforms(
+                789, Config(haruka_group_features={789: ["save_sticker"]})
+            ),
+            set(),
+        )
 
     def test_video_cache_settings_defaults_and_limits(self):
         config = Config()

@@ -16,6 +16,7 @@ delete_sub = on_command(
     aliases={"删除主播", "取消关注"},
     rule=to_me(),
     priority=5,
+    feature="sub",
 )
 delete_sub.__doc__ = """取关 UID"""
 

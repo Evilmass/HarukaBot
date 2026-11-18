@@ -4,7 +4,7 @@ from ...database import DB as db
 from ...utils import get_type_id, on_command, permission_check, to_me
 from ..pusher.live_pusher import status
 
-live_now = on_command("已开播", rule=to_me(), priority=5)
+live_now = on_command("已开播", rule=to_me(), priority=5, feature="live")
 live_now.__doc__ = """已开播"""
 
 live_now.handle()(permission_check)

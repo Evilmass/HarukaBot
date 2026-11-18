@@ -29,4 +29,5 @@ async def notify_live_duration():
             send_type="group",
             type_id=ml["group_id"],
             message=ml["message"],
+            feature="live_duration",
         )

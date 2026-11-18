@@ -1,11 +1,13 @@
 import json
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from loguru import logger
 from nonebot import get_driver
 from pydantic import BaseSettings, validator
 from pydantic.fields import ModelField
+
+from .features import normalize_features
 
 
 # 其他地方出现的类似 from .. import config，均是从 __init__.py 导入的 Config 实例
@@ -62,11 +64,20 @@ class Config(BaseSettings):
     haruka_douyin_video_groups: List[int] = []
     haruka_douyin_video_cookie: Optional[str] = None
     haruka_douyin_video_cookie_file: Optional[str] = None
+    # 这些群只保留视频解析：不响应指令，也不接收直播/动态等推送
+    haruka_video_only_groups: List[int] = []
+    # {群号: [功能]}；未列出的群保留全部功能，显式配置优先于仅视频群
+    haruka_group_features: Dict[int, List[str]] = {}
     # 频道管理员身份组
     haruka_guild_admin_roles: List[str] = ["频道主", "超级管理员"]
     ignore_group: Optional[List[int]]
 
-    @validator("haruka_bili_video_groups", "haruka_douyin_video_groups", pre=True)
+    @validator(
+        "haruka_bili_video_groups",
+        "haruka_douyin_video_groups",
+        "haruka_video_only_groups",
+        pre=True,
+    )
     def parse_bili_video_groups(cls, v):
         """群号既支持 JSON 数组，也支持逗号或空格分隔。"""
         if v is None or v == "":
@@ -79,6 +90,20 @@ class Config(BaseSettings):
                 value = [item for item in re.split(r"[\s,;]+", value) if item]
             v = value
         return [int(group_id) for group_id in v]
+
+    @validator("haruka_group_features", pre=True)
+    def parse_group_features(cls, v):
+        """{群号: 功能列表} 形式；功能值支持数组或逗号、空格分隔。"""
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            v = json.loads(v)
+        if not isinstance(v, dict):
+            raise ValueError("haruka_group_features 必须是 {群号: [功能]} 形式的对象")
+        return {
+            int(group_id): normalize_features(features)
+            for group_id, features in v.items()
+        }
 
     @validator(
         "haruka_bili_video_quality",
@@ -142,7 +167,12 @@ class Config(BaseSettings):
 
         @classmethod
         def parse_env_var(cls, field_name: str, raw_value: str):
-            if field_name in {"haruka_bili_video_groups", "haruka_douyin_video_groups"}:
+            if field_name in {
+                "haruka_bili_video_groups",
+                "haruka_douyin_video_groups",
+                "haruka_video_only_groups",
+                "haruka_group_features",
+            }:
                 return raw_value
             return json.loads(raw_value)
 

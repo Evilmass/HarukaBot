@@ -85,6 +85,15 @@ HARUKA_DOUYIN_VIDEO_COOKIE=
 # 相对路径以 HARUKA_DIR 为根，也可以配置绝对路径
 HARUKA_DOUYIN_VIDEO_COOKIE_FILE=douyin_cookies.txt
 
+# 仅启用视频解析的群（等价于给该群配置 ["video"]）
+HARUKA_VIDEO_ONLY_GROUPS=[]
+# 按群启用功能：{"群号": ["功能", ...]}；未列出的群保留全部功能
+# 显式启用 video 且未配置平台白名单时，默认解析 B 站和抖音
+# 可用功能：video, save_sticker, sub, live, dynamic, at, permission,
+#           live_duration, help, server_ip, maintenance，或 all
+# 示例：{"123456789": ["video", "save_sticker"], "987654321": "all"}
+HARUKA_GROUP_FEATURES={}
+
 # 可选通用配置：设置后优先于对应 HARUKA_BILI_VIDEO_*，未设置则继承旧值
 HARUKA_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 HARUKA_VIDEO_MAX_SIZE_MB=90
@@ -96,6 +105,19 @@ HARUKA_VIDEO_TIMEOUT=600
 HARUKA_VIDEO_CACHE_ENABLED=True
 HARUKA_VIDEO_CACHE_DAYS=7
 ```
+
+如果某个群只想保留部分功能，用 `HARUKA_GROUP_FEATURES` 指定该群启用的功能：
+未列出的群保持全部功能，列出的群只启用指定项。例如只保留视频解析和 `save`
+保存表情包：
+
+```dotenv
+HARUKA_GROUP_FEATURES={"123456789": ["video", "save_sticker"]}
+```
+
+`HARUKA_VIDEO_ONLY_GROUPS` 是 `["video"]` 的快捷写法；同一群同时配置时以
+`HARUKA_GROUP_FEATURES` 为准。显式启用 `video` 但未配置平台白名单时，默认同时
+解析 B 站和抖音；如果群在 `HARUKA_BILI_VIDEO_GROUPS` 或
+`HARUKA_DOUYIN_VIDEO_GROUPS` 中，则只解析对应平台。
 
 宿主机运行时需安装 `ffmpeg` 并确保它在 `PATH` 中；Docker 镜像已内置。
 HarukaBot 会通过临时 HTTP 地址让 NapCat 获取视频，以“作品说明＋视频”两个

@@ -12,6 +12,7 @@ live_duration = on_command(
     aliases={"nbw", "耐播王"},
     rule=to_me(),
     priority=5,
+    feature="live_duration",
 )
 live_duration.__doc__ = """耐播王 [今日|昨日|YYYY-MM-DD] -> nbw"""
 

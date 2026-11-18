@@ -20,6 +20,7 @@ server_ip = on_command(
     aliases={"IP", "联机ip", "服务器ip"},
     rule=to_me(),
     priority=5,
+    feature="server_ip",
 )
 server_ip.__doc__ = """获取联机服务器地址 -> ip"""
 
