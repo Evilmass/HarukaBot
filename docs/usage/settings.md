@@ -248,7 +248,7 @@ HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 
 | 功能 | 说明 |
 | --- | --- |
-| `video` | 群聊 B 站/抖音视频解析 |
+| `video` | 群聊 B 站/抖音视频解析（两个平台同时开启） |
 | `save_sticker` | `save` 保存表情包指令（别名 `save`） |
 | `sub` | 关注、取关、关注列表 |
 | `live` | 开启/关闭直播、已开播指令及开播/下播推送 |
@@ -274,9 +274,9 @@ HARUKA_GROUP_FEATURES={"123456789": ["video", "save_sticker"], "987654321": "all
 
 仅启用视频的群仍可使用快捷配置 `HARUKA_VIDEO_ONLY_GROUPS`；它等价于在
 `HARUKA_GROUP_FEATURES` 中给该群配置 `["video"]`。同一群同时出现在两处时，
-以 `HARUKA_GROUP_FEATURES` 为准。显式启用 `video` 且未配置平台白名单时，
-默认同时解析 B 站和抖音；如果群出现在 `HARUKA_BILI_VIDEO_GROUPS` 或
-`HARUKA_DOUYIN_VIDEO_GROUPS` 中，则只解析对应平台。
+以 `HARUKA_GROUP_FEATURES` 为准。启用 `video` 功能后会同时解析 B 站和抖音，
+不再需要配置平台群号白名单；未列出的群默认包含 `video`，因此视频解析默认
+在所有群生效。
 
 ```dotenv
 HARUKA_VIDEO_ONLY_GROUPS=[123456789]
@@ -286,12 +286,12 @@ HARUKA_VIDEO_ONLY_GROUPS=[123456789]
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
-| `HARUKA_DOUYIN_VIDEO_GROUPS` | `[]` | 允许自动解析抖音视频的群号；JSON 数组或逗号、空格分隔 |
+| `HARUKA_DOUYIN_VIDEO_GROUPS` | `[]` | 旧配置：仅在未配置 `HARUKA_GROUP_FEATURES` 且使用平台白名单时生效 |
 | `HARUKA_DOUYIN_VIDEO_COOKIE` | 未配置 | Cookie 请求头字符串，非空时优先于文件 |
 | `HARUKA_DOUYIN_VIDEO_COOKIE_FILE` | `HARUKA_DIR/douyin_cookies.txt` | Netscape Cookie 文件；自定义相对路径以 HARUKA_DIR 为根 |
 
 ```dotenv
-HARUKA_DOUYIN_VIDEO_GROUPS=[123456789]
+HARUKA_GROUP_FEATURES={"123456789": ["video"]}
 HARUKA_DOUYIN_VIDEO_COOKIE_FILE=douyin_cookies.txt
 HARUKA_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 ```

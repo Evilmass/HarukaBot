@@ -23,6 +23,20 @@ PLATFORM_NAMES = {"bilibili": "B 站", "douyin": "抖音"}
 
 
 def allowed_platforms(group_id: int, config: Config = plugin_config) -> Set[str]:
+    """启用 video 功能即可解析两个平台。
+
+    未配置任何平台白名单或配置了 HARUKA_GROUP_FEATURES 时，视频解析完全由
+    群功能决定，未列出的群默认包含 video；只有旧部署单独配置了平台白名单时，
+    才沿用白名单限定平台。
+    """
+    legacy = bool(
+        config.haruka_bili_video_groups or config.haruka_douyin_video_groups
+    ) and not config.haruka_group_features
+    if not legacy:
+        features = resolve_group_features(
+            group_id, config.haruka_group_features, config.haruka_video_only_groups,
+        )
+        return {"bilibili", "douyin"} if "video" in features else set()
     platforms = set()
     if group_id in config.haruka_bili_video_groups:
         platforms.add("bilibili")
@@ -30,16 +44,7 @@ def allowed_platforms(group_id: int, config: Config = plugin_config) -> Set[str]
         platforms.add("douyin")
     if platforms:
         return platforms
-    # 显式启用 video 但未配置平台白名单时，默认解析两个平台。
-    explicit = (
-        group_id in (config.haruka_group_features or {})
-        or group_id in (config.haruka_video_only_groups or [])
-    )
-    if explicit and "video" in resolve_group_features(
-        group_id,
-        config.haruka_group_features,
-        config.haruka_video_only_groups,
-    ):
+    if group_id in (config.haruka_video_only_groups or []):
         return {"bilibili", "douyin"}
     return platforms
 

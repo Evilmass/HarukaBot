@@ -54,7 +54,7 @@ ws://127.0.0.1:7070/onebot/v11/ws
 
 ## 群聊 B 站与抖音视频转发
 
-配置允许使用该功能的 QQ 群后，机器人会捕捉群消息中的
+默认所有群都会捕捉消息中的
 `bilibili.com/video/...`、`b23.tv/...`、`b23.wtf/...` 和
 `bili2233.cn/...` 视频链接，下载最高不超过配置清晰度的 DASH 视频、音频流，
 通过 FFmpeg 合并为 MP4。抖音支持复制分享文本、`v.douyin.com`、
@@ -63,10 +63,12 @@ ws://127.0.0.1:7070/onebot/v11/ws
 抖音图集按“作品说明＋多张图片”发送。B 站最高画质超过文件大小
 限制时会逐档降低清晰度；仍然超限时拒绝发送，不进行压缩或上传群文件。
 B 站短链指向直播间、动态、番剧等非视频页面时会被静默忽略，不发送处理提示。
+如需限制某些群的视频解析，在 `HARUKA_GROUP_FEATURES` 中给该群配置不含
+`video` 的功能列表即可。
 
 ```dotenv
-# JSON 数组，或使用逗号/空格分隔的群号
-HARUKA_BILI_VIDEO_GROUPS=[123456789,987654321]
+# 旧配置：仅在未配置 HARUKA_GROUP_FEATURES 且使用平台白名单时生效
+HARUKA_BILI_VIDEO_GROUPS=[]
 # 可选；登录 Cookie 能获取账号有权观看的清晰度，请妥善保管
 HARUKA_BILI_VIDEO_COOKIE=
 # HarukaBot 对 NapCat 可访问的地址
@@ -78,8 +80,8 @@ HARUKA_BILI_VIDEO_MAX_LINKS=3
 HARUKA_BILI_VIDEO_CONCURRENCY=2
 HARUKA_BILI_VIDEO_TIMEOUT=600
 
-# 抖音白名单独立设置；[] 表示关闭
-HARUKA_DOUYIN_VIDEO_GROUPS=[123456789]
+# 旧配置：仅在未配置 HARUKA_GROUP_FEATURES 且使用平台白名单时生效
+HARUKA_DOUYIN_VIDEO_GROUPS=[]
 # 可选：非空字符串优先于 Cookie 文件
 HARUKA_DOUYIN_VIDEO_COOKIE=
 # Netscape 文件；默认读取 HARUKA_DIR/douyin_cookies.txt
@@ -89,6 +91,7 @@ HARUKA_DOUYIN_VIDEO_COOKIE_FILE=douyin_cookies.txt
 # 仅启用视频解析的群（等价于给该群配置 ["video"]）
 HARUKA_VIDEO_ONLY_GROUPS=[]
 # 按群启用功能：{"群号": ["功能", ...]}；未列出的群保留全部功能
+# 启用 video 即同时解析 B 站和抖音，无需再配置平台群号白名单
 # 可用功能：video, save_sticker, sub, live, dynamic, at, permission,
 #           live_duration, help, server_ip, maintenance，或 all
 # 示例：{"123456789": ["video", "save_sticker"], "987654321": "all"}
@@ -115,9 +118,11 @@ HARUKA_GROUP_FEATURES={"123456789": ["video", "save_sticker"]}
 ```
 
 `HARUKA_VIDEO_ONLY_GROUPS` 是 `["video"]` 的快捷写法；同一群同时配置时以
-`HARUKA_GROUP_FEATURES` 为准。显式启用 `video` 但未配置平台白名单时，默认同时
-解析 B 站和抖音；如果群在 `HARUKA_BILI_VIDEO_GROUPS` 或
-`HARUKA_DOUYIN_VIDEO_GROUPS` 中，则只解析对应平台。
+`HARUKA_GROUP_FEATURES` 为准。启用 `video` 后会同时解析 B 站和抖音，不需要
+再配置平台群号白名单；未列出的群默认包含 `video`，因此视频解析默认在所有群
+生效。`HARUKA_BILI_VIDEO_GROUPS` / `HARUKA_DOUYIN_VIDEO_GROUPS` 仅用于兼容
+旧部署：只有未配置 `HARUKA_GROUP_FEATURES` 且仍使用这两个白名单时，
+才按白名单限定平台。
 
 宿主机运行时需安装 `ffmpeg` 并确保它在 `PATH` 中；Docker 镜像已内置。
 HarukaBot 会通过临时 HTTP 地址让 NapCat 获取视频或图集图片，以

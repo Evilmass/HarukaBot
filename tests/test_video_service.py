@@ -129,24 +129,34 @@ class VideoConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {"HARUKA_DOUYIN_VIDEO_GROUPS": "[123,456]"}):
             self.assertEqual(Config().haruka_douyin_video_groups, [123, 456])
         self.assertEqual(Config(haruka_video_max_links=0).haruka_video_max_links, 1)
+        # 默认配置不依赖平台白名单：video 功能默认开启，两个平台都解析。
+        self.assertEqual(allowed_platforms(789, Config()), {"bilibili", "douyin"})
+        # 旧部署单独配置了平台白名单时，仍按白名单限定平台。
         config = Config(haruka_bili_video_groups=[123], haruka_douyin_video_groups=[456])
         self.assertEqual(allowed_platforms(123, config), {"bilibili"})
         self.assertEqual(allowed_platforms(456, config), {"douyin"})
         self.assertEqual(allowed_platforms(789, config), set())
 
+        # 配置功能表后由 video 功能统一控制两个平台，平台白名单不再参与。
         feature_config = Config(haruka_group_features={789: ["video"]})
         self.assertEqual(
             allowed_platforms(789, feature_config), {"bilibili", "douyin"}
         )
         self.assertEqual(
+            allowed_platforms(456, feature_config), {"bilibili", "douyin"}
+        )
+        self.assertEqual(
             allowed_platforms(789, Config(haruka_video_only_groups=[789])),
             {"bilibili", "douyin"},
         )
-        limited = Config(
-            haruka_group_features={789: ["video"]},
-            haruka_bili_video_groups=[789],
+        self.assertEqual(
+            allowed_platforms(789, Config(
+                haruka_group_features={789: ["video"]},
+                haruka_bili_video_groups=[123],
+                haruka_douyin_video_groups=[456],
+            )),
+            {"bilibili", "douyin"},
         )
-        self.assertEqual(allowed_platforms(789, limited), {"bilibili"})
         self.assertEqual(
             allowed_platforms(
                 789, Config(haruka_group_features={789: ["save_sticker"]})

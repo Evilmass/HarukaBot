@@ -39,6 +39,7 @@ class Config(BaseSettings):
     haruka_dynamic_font: Optional[str] = "Noto Sans CJK SC"
     haruka_dynamic_big_image: bool = False
     haruka_command_prefix: str = ""
+    # 旧配置：仅在未配置 haruka_group_features 时参与视频平台判断
     haruka_bili_video_groups: List[int] = []
     haruka_bili_video_cookie: Optional[str] = None
     haruka_bili_video_public_base_url: Optional[str] = None
@@ -61,6 +62,7 @@ class Config(BaseSettings):
     # 下载成功后按作品缓存视频文件，在保留期内直接复用，避免重复解析下载。
     haruka_video_cache_enabled: bool = True
     haruka_video_cache_days: int = 7
+    # 旧配置：仅在未配置 haruka_group_features 时参与视频平台判断
     haruka_douyin_video_groups: List[int] = []
     haruka_douyin_video_cookie: Optional[str] = None
     haruka_douyin_video_cookie_file: Optional[str] = None
