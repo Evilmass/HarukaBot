@@ -9,6 +9,23 @@ from nonebot.log import logger
 from .models import VideoError, VideoTooLarge
 
 
+def image_suffix(prefix: bytes) -> str:
+    """按文件头识别 QQ 常见的图片格式，无法识别时返回空字符串。"""
+    if prefix.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if prefix.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if prefix.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP":
+        return ".webp"
+    return ""
+
+
+def is_image(prefix: bytes) -> bool:
+    return bool(image_suffix(prefix))
+
+
 @asynccontextmanager
 async def media_stream(
     client: httpx.AsyncClient, url: str, headers: Dict[str, str],
@@ -40,6 +57,7 @@ async def media_stream(
 async def download_file(
     client: httpx.AsyncClient, url: str, target: Path, max_bytes: int,
     headers: Dict[str, str], *, require_mp4: bool = False,
+    require_image: bool = False, label: str = "视频",
     scope: str = "[视频下载]", timeout: Optional[httpx.Timeout] = None,
     progress_interval: int = 0,
 ) -> int:
@@ -52,21 +70,31 @@ async def download_file(
             response.raise_for_status()
             content_length = int(response.headers.get("content-length", 0))
             if content_length > max_bytes:
-                raise VideoTooLarge(f"视频文件超过 {max_bytes // 1024 // 1024} MB 限制")
+                raise VideoTooLarge(
+                    f"{label}文件超过 {max_bytes // 1024 // 1024} MB 限制"
+                )
             content_type = response.headers.get("content-type", "").lower()
             if require_mp4 and (
                 content_type.startswith(("text/", "image/")) or "json" in content_type
             ):
                 raise VideoError("视频地址没有返回有效的 MP4 文件")
+            if require_image and (
+                content_type.startswith(("text/", "video/")) or "json" in content_type
+            ):
+                raise VideoError("图片地址没有返回有效的图片文件")
             with target.open("wb") as output:
                 async for chunk in response.aiter_bytes(1024 * 1024):
                     size += len(chunk)
                     if size > max_bytes:
-                        raise VideoTooLarge(f"视频文件超过 {max_bytes // 1024 // 1024} MB 限制")
+                        raise VideoTooLarge(
+                            f"{label}文件超过 {max_bytes // 1024 // 1024} MB 限制"
+                        )
                     if len(prefix) < 64:
                         prefix += chunk[:64 - len(prefix)]
                     if require_mp4 and len(prefix) == 64 and b"ftyp" not in prefix:
                         raise VideoError("视频地址没有返回有效的 MP4 文件")
+                    if require_image and len(prefix) >= 12 and not is_image(prefix):
+                        raise VideoError("图片地址没有返回有效的图片文件")
                     output.write(chunk)
                     if next_progress and size >= next_progress:
                         logger.info(
@@ -75,6 +103,8 @@ async def download_file(
                         next_progress += progress_interval
             if not size or (require_mp4 and b"ftyp" not in prefix):
                 raise VideoError("视频地址没有返回有效的 MP4 文件")
+            if require_image and not is_image(prefix):
+                raise VideoError("图片地址没有返回有效的图片文件")
             if content_length and size != content_length:
                 raise VideoError("视频下载不完整，请稍后重试")
             # Range 返回部分文件时，不能把缺失的其余内容当作完整视频发送。

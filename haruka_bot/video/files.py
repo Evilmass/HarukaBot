@@ -2,28 +2,33 @@ import asyncio
 import shutil
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Set
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
-from .models import VideoError
+from .models import IMAGE_NAME_RE, VideoError
 
 VIDEO_SERVE_PREFIX = "/haruka/video/files"
+MEDIA_TYPES = {
+    ".mp4": "video/mp4", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+}
 
 
 @dataclass
 class VideoJob:
     directory: Path
     path: Optional[Path] = None
+    images: Dict[str, Path] = field(default_factory=dict)
     active: bool = True
     expires_at: Optional[float] = None
 
 
 class VideoFileStore:
-    """只提供已登记的 MP4 文件，目录和清理均按任务隔离。"""
+    """只提供已登记的媒体文件，目录和清理均按任务隔离。"""
 
     def __init__(self, root: Path, ttl: float = 300):
         self.root = root.resolve()
@@ -54,20 +59,43 @@ class VideoFileStore:
         job.path = resolved
         return f"{VIDEO_SERVE_PREFIX}/{task_id}/video.mp4"
 
-    async def serve(self, task_id: str):
+    def register_image(self, task_id: str, path: Path) -> str:
+        job = self.jobs[task_id]
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self.root)
+            resolved.relative_to(job.directory.resolve())
+        except ValueError:
+            raise VideoError("图片文件不在当前任务目录中") from None
+        if not resolved.is_file() or not IMAGE_NAME_RE.fullmatch(resolved.name):
+            raise VideoError("没有生成有效的图片文件")
+        job.images[resolved.name] = resolved
+        return f"{VIDEO_SERVE_PREFIX}/{task_id}/{resolved.name}"
+
+    async def serve(self, task_id: str, filename: str = "video.mp4"):
         job = self.jobs.get(task_id)
         if job and job.expires_at is not None and time.time() >= job.expires_at:
             self.remove(task_id)
             job = None
-        if job is None or job.path is None or not job.path.is_file():
-            raise HTTPException(status_code=404, detail="视频不存在或已过期")
+        if job is None:
+            raise HTTPException(status_code=404, detail="文件不存在或已过期")
+        if filename == "video.mp4":
+            path, media_type = job.path, MEDIA_TYPES[".mp4"]
+        else:
+            path, media_type = job.images.get(filename), MEDIA_TYPES.get(
+                Path(filename).suffix
+            )
+        if path is None or media_type is None or not path.is_file():
+            raise HTTPException(status_code=404, detail="文件不存在或已过期")
         try:
-            job.path.resolve().relative_to(self.root)
-            job.path.resolve().relative_to(job.directory.resolve())
+            path.resolve().relative_to(self.root)
+            path.resolve().relative_to(job.directory.resolve())
         except ValueError:
-            raise HTTPException(status_code=404, detail="视频不存在") from None
+            raise HTTPException(status_code=404, detail="文件不存在") from None
         return FileResponse(
-            job.path, media_type="video/mp4", filename="video.mp4",
+            path, media_type=media_type,
+            # 图片不设置 attachment 文件名，便于客户端直接内联显示。
+            filename=filename if filename == "video.mp4" else None,
             headers={"Cache-Control": "no-store"},
         )
 

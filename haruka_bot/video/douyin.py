@@ -13,7 +13,7 @@ import httpx
 from nonebot.log import logger
 
 from ..config import Config, plugin_config
-from .download import download_file
+from .download import download_file, image_suffix
 from .models import DownloadedVideo, VideoError, VideoSettings, VideoTooLarge
 
 DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
@@ -27,6 +27,11 @@ DOUYIN_URL_RE = re.compile(
     r"(?:www\.)?iesdouyin\.com)/[0-9A-Za-z?&=_%./:+~#@-]*", re.IGNORECASE,
 )
 TRAILING_URL_CHARS = ".,;:!?，。；：！？)]}）】》\"'"
+MAX_ALBUM_IMAGES = 35
+MEDIA_HEADERS = {"Referer": "https://www.douyin.com/", "Accept-Encoding": "identity"}
+IMAGE_HEADERS = {
+    **MEDIA_HEADERS, "Accept": "image/jpeg,image/png,image/webp,image/gif",
+}
 _ttwid: Optional[str] = None
 _ttwid_lock = asyncio.Lock()
 
@@ -130,12 +135,10 @@ class DouyinVideoProvider:
         for _ in range(11):
             reference = parse_video_url(url)
             if reference:
-                if reference.kind == "note":
-                    raise VideoError("暂不支持抖音图集，仅支持视频作品")
                 return reference
             parsed = urlparse(url)
             if parsed.scheme not in {"http", "https"} or parsed.hostname not in DOUYIN_HOSTS:
-                raise VideoError("链接没有跳转到可识别的抖音视频")
+                raise VideoError("链接没有跳转到可识别的抖音作品")
             try:
                 response = await self.client.get(url, follow_redirects=False)
                 if not response.has_redirect_location:
@@ -143,7 +146,7 @@ class DouyinVideoProvider:
             except httpx.HTTPError:
                 raise VideoError("抖音短链接解析失败，请稍后重试") from None
             if not response.has_redirect_location:
-                raise VideoError("仅支持抖音视频作品，不支持作者主页或直播")
+                raise VideoError("仅支持抖音作品链接，不支持作者主页或直播")
             url = str(response.url.join(response.headers["location"]))
         raise VideoError("抖音短链接重定向次数过多")
 
@@ -196,14 +199,14 @@ class DouyinVideoProvider:
             raise VideoError("抖音作品不可用或接口受限，请检查链接及 Cookie")
         if str(detail.get("aweme_id", "")) != reference.aweme_id:
             raise VideoError("抖音接口返回了不匹配的作品")
-        if detail.get("images"):
-            raise VideoError("暂不支持抖音图集，仅支持视频作品")
-        if not isinstance(detail.get("video"), dict):
-            raise VideoError("该抖音作品没有可下载的视频")
+        if not detail.get("images") and not isinstance(detail.get("video"), dict):
+            raise VideoError("该抖音作品没有可下载的视频或图片")
         return detail
 
     async def download(self, reference: DouyinReference, directory: Path) -> DownloadedVideo:
         detail = await self.fetch_detail(reference)
+        if isinstance(detail.get("images"), list) and detail["images"]:
+            return await self._download_album(detail, reference, directory)
         video = detail["video"]
         address = video.get("play_addr") or {}
         if not isinstance(address, dict):
@@ -227,8 +230,8 @@ class DouyinVideoProvider:
             try:
                 await download_file(
                     self.media_client, url, path, self.settings.max_bytes,
-                    {"Referer": "https://www.douyin.com/", "Accept-Encoding": "identity"},
-                    require_mp4=True, scope=f"[抖音视频][{reference.aweme_id}]",
+                    MEDIA_HEADERS, require_mp4=True,
+                    scope=f"[抖音视频][{reference.aweme_id}]",
                 )
                 break
             except VideoTooLarge:
@@ -239,12 +242,86 @@ class DouyinVideoProvider:
                 )
         else:
             raise VideoError("抖音视频下载失败，播放地址可能已失效，请稍后重试") from None
+        duration = max(int(video.get("duration") or 0) // 1000, 0)
+        return self._downloaded(detail, reference, path, duration)
+
+    async def _download_album(
+        self, detail: Dict[str, Any], reference: DouyinReference, directory: Path,
+    ) -> DownloadedVideo:
+        """图集逐张下载，个别图片失败时跳过，保留其余可发送的图片。"""
+        items = [
+            item for item in detail["images"][:MAX_ALBUM_IMAGES] if isinstance(item, dict)
+        ]
+        paths: List[Path] = []
+        total = 0
+        for index, item in enumerate(items, 1):
+            urls = _image_urls(item)
+            if not urls:
+                logger.warning(
+                    f"[抖音图集][{reference.aweme_id}] 第 {index} 张图片缺少地址，已跳过"
+                )
+                continue
+            target = directory / f"image-{index:03d}.jpg"
+            for url in urls:
+                try:
+                    total += await download_file(
+                        self.media_client, url, target, self.settings.max_bytes,
+                        IMAGE_HEADERS, require_image=True, label="图片",
+                        scope=f"[抖音图集][{reference.aweme_id}]",
+                    )
+                    target = _rename_by_content(target)
+                    paths.append(target)
+                    break
+                except VideoTooLarge:
+                    raise
+                except (httpx.HTTPError, ValueError, VideoError) as error:
+                    logger.warning(
+                        f"[抖音图集][{reference.aweme_id}] 第 {index} 张图片尝试备用地址："
+                        f"{type(error).__name__}"
+                    )
+            else:
+                logger.warning(
+                    f"[抖音图集][{reference.aweme_id}] 第 {index} 张图片下载失败，已跳过"
+                )
+            if total > self.settings.max_bytes:
+                raise VideoTooLarge(f"图集超过 {self.settings.max_size_mb} MB 限制")
+        if not paths:
+            raise VideoError("抖音图集没有可下载的图片，请稍后重试")
+        return self._downloaded(detail, reference, paths[0], 0, tuple(paths))
+
+    def _downloaded(
+        self, detail: Dict[str, Any], reference: DouyinReference, path: Path,
+        duration: int, image_paths: Tuple[Path, ...] = (),
+    ) -> DownloadedVideo:
         author = detail.get("author") or {}
-        duration = video.get("duration") or 0
+        kind = "note" if image_paths else "video"
         return DownloadedVideo(
             platform="douyin", video_id=reference.aweme_id,
-            title=str(detail.get("desc") or "未命名抖音视频"),
+            title=str(detail.get("desc") or "未命名抖音作品"),
             author=str(author.get("nickname") or "未知作者") if isinstance(author, dict) else "未知作者",
-            duration=max(int(duration) // 1000, 0),
-            canonical_url=f"https://www.douyin.com/video/{reference.aweme_id}", path=path,
+            duration=duration,
+            canonical_url=f"https://www.douyin.com/{kind}/{reference.aweme_id}",
+            path=path, image_paths=image_paths,
         )
+
+
+def _image_urls(item: Dict[str, Any]) -> List[str]:
+    urls: List[str] = []
+    for key in ("url_list", "download_url_list"):
+        values = item.get(key)
+        if isinstance(values, list):
+            urls.extend(url for url in values if isinstance(url, str))
+    return list(dict.fromkeys(
+        url for url in urls if urlparse(url).scheme in {"http", "https"}
+    ))
+
+
+def _rename_by_content(path: Path) -> Path:
+    """按实际内容修正扩展名，CDN 可能返回与原链接后缀不同的格式。"""
+    with path.open("rb") as file:
+        suffix = image_suffix(file.read(12))
+    if not suffix or path.suffix == suffix:
+        return path
+    renamed = path.with_suffix(suffix)
+    path.replace(renamed)
+    return renamed

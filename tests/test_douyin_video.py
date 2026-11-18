@@ -16,6 +16,9 @@ from haruka_bot.video.models import VideoError, VideoSettings, VideoTooLarge
 
 VIDEO_ID = "7521023890996514083"
 MP4 = b"\x00\x00\x00\x18ftypisom" + b"video" * 20
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"image" * 12
+PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"image" * 12
+WEBP = b"RIFF\x00\x01\x00\x00WEBPVP8 " + b"image" * 12
 
 
 def settings():
@@ -31,6 +34,10 @@ def detail(**overrides):
     }
     value.update(overrides)
     return {"status_code": 0, "aweme_detail": value}
+
+
+def album(images):
+    return detail(images=images, video=None)
 
 
 class DouyinUrlTests(unittest.TestCase):
@@ -109,21 +116,26 @@ class DouyinDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.lock_patch.start()
         self.addCleanup(self.lock_patch.stop)
 
-    async def make_provider(self, metadata_handler, media_handler=None, cookies=None):
+    async def make_provider(
+        self, metadata_handler, media_handler=None, cookies=None, video_settings=None,
+    ):
         client = httpx.AsyncClient(transport=httpx.MockTransport(metadata_handler), cookies=cookies)
         media_client = httpx.AsyncClient(transport=httpx.MockTransport(media_handler or metadata_handler))
         self.addAsyncCleanup(client.aclose)
         self.addAsyncCleanup(media_client.aclose)
-        return douyin.DouyinVideoProvider(client, media_client, settings())
+        return douyin.DouyinVideoProvider(client, media_client, video_settings or settings())
 
     async def test_short_link_redirect_and_unsupported_destinations(self):
         def handler(request):
-            return httpx.Response(302, headers={"Location": f"https://www.douyin.com/video/{VIDEO_ID}"})
+            target = "note" if request.url.path == "/note-link/" else "video"
+            return httpx.Response(302, headers={"Location": f"https://www.douyin.com/{target}/{VIDEO_ID}"})
         provider = await self.make_provider(handler)
         reference = await provider.resolve("https://v.douyin.com/abc/")
         self.assertEqual(reference.aweme_id, VIDEO_ID)
-        with self.assertRaisesRegex(VideoError, "图集"):
-            await provider.resolve(f"https://www.douyin.com/note/{VIDEO_ID}")
+        note = await provider.resolve("https://v.douyin.com/note-link/")
+        self.assertEqual((note.aweme_id, note.kind), (VIDEO_ID, "note"))
+        direct = await provider.resolve(f"https://www.douyin.com/note/{VIDEO_ID}")
+        self.assertEqual((direct.aweme_id, direct.kind), (VIDEO_ID, "note"))
         with self.assertRaisesRegex(VideoError, "跳转"):
             await provider.resolve("https://outside.example/video/123")
 
@@ -174,6 +186,109 @@ class DouyinDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(downloaded.duration, 65)
         self.assertIn("作者：作者", downloaded.description)
 
+    async def test_album_downloads_images_in_order_and_detects_format(self):
+        calls = []
+        def metadata(request):
+            return httpx.Response(200, json=album([
+                {"url_list": [
+                    "https://p3-sign.douyinpic.com/tos-cn-i-0813/aaa~tplv-dy-aweme-images:q75.jpeg"
+                    "?biz_tag=aweme_images&x-expires=1",
+                ]},
+                {"url_list": [
+                    "https://p3-sign.douyinpic.com/tos-cn-i-0813/bbb~tplv-dy-aweme-images:q75.webp"
+                    "?biz_tag=aweme_images&x-signature=abc",
+                ]},
+                {"label": "没有地址的图片"},
+            ]))
+        def media(request):
+            self.assertNotIn("cookie", request.headers)
+            self.assertEqual(request.headers["referer"], "https://www.douyin.com/")
+            self.assertTrue(request.url.query)
+            calls.append(request.url.path)
+            content = WEBP if "bbb" in request.url.path else JPEG
+            return httpx.Response(
+                200, headers={"Content-Type": "image/jpeg"}, content=content,
+            )
+        provider = await self.make_provider(metadata, media)
+        downloaded = await provider.download(
+            douyin.DouyinReference("url", VIDEO_ID, "note"), Path(self.directory.name),
+        )
+        self.assertTrue(downloaded.is_album)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("aaa~tplv-dy-aweme-images:q75.jpeg", calls[0])
+        self.assertIn("bbb~tplv-dy-aweme-images:q75.webp", calls[1])
+        self.assertEqual(
+            [path.name for path in downloaded.image_paths],
+            ["image-001.jpg", "image-002.webp"],
+        )
+        self.assertEqual(downloaded.image_paths[0].read_bytes(), JPEG)
+        self.assertEqual(downloaded.image_paths[1].read_bytes(), WEBP)
+        self.assertEqual(downloaded.canonical_url, f"https://www.douyin.com/note/{VIDEO_ID}")
+        self.assertIn("图集：2 张", downloaded.description)
+        self.assertNotIn("时长", downloaded.description)
+
+    async def test_album_uses_backup_urls_and_skips_broken_images(self):
+        def metadata(request):
+            return httpx.Response(200, json=album([
+                {"url_list": ["https://p3.example/first", "https://p4.example/backup"]},
+                {"url_list": ["https://p3.example/broken"]},
+            ]))
+        def media(request):
+            if request.url.path == "/first":
+                return httpx.Response(403)
+            if request.url.path == "/broken":
+                return httpx.Response(
+                    200, headers={"Content-Type": "text/html"}, content=b"<html>expired</html>",
+                )
+            return httpx.Response(200, content=PNG)
+        provider = await self.make_provider(metadata, media)
+        downloaded = await provider.download(
+            douyin.DouyinReference("url", VIDEO_ID, "note"), Path(self.directory.name),
+        )
+        self.assertEqual([path.name for path in downloaded.image_paths], ["image-001.png"])
+        self.assertEqual(downloaded.image_paths[0].read_bytes(), PNG)
+        self.assertIn("图集：1 张", downloaded.description)
+
+    async def test_album_without_usable_images_fails(self):
+        def metadata(request):
+            return httpx.Response(200, json=album([
+                {"url_list": ["https://p3.example/broken"]},
+                {"label": "没有地址的图片"},
+            ]))
+        def media(request):
+            return httpx.Response(
+                200, headers={"Content-Type": "text/html"}, content=b"<html></html>",
+            )
+        provider = await self.make_provider(metadata, media)
+        with self.assertRaisesRegex(VideoError, "没有可下载的图片"):
+            await provider.download(
+                douyin.DouyinReference("url", VIDEO_ID, "note"), Path(self.directory.name),
+            )
+
+    async def test_album_total_size_and_image_count_are_limited(self):
+        image = JPEG + b"x" * (600 * 1024)
+        def metadata(request):
+            return httpx.Response(200, json=album([
+                {"url_list": ["https://p3.example/1"]},
+                {"url_list": ["https://p3.example/2"]},
+                {"url_list": ["https://p3.example/3"]},
+            ]))
+        def media(request):
+            return httpx.Response(200, content=image)
+        provider = await self.make_provider(
+            metadata, media, video_settings=VideoSettings("http://bot.example", 1, 3, 2, "ffmpeg", 30),
+        )
+        with self.assertRaisesRegex(VideoTooLarge, "图集超过 1 MB"):
+            await provider.download(
+                douyin.DouyinReference("url", VIDEO_ID, "note"), Path(self.directory.name),
+            )
+        with patch.object(douyin, "MAX_ALBUM_IMAGES", 2):
+            provider = await self.make_provider(metadata, media)
+            downloaded = await provider.download(
+                douyin.DouyinReference("url", VIDEO_ID, "note"), Path(self.directory.name),
+            )
+        self.assertEqual(len(downloaded.image_paths), 2)
+
     async def test_detail_failure_modes_are_safe(self):
         cases = [
             (httpx.Response(403, text="secret session info"), "Cookie"),
@@ -181,7 +296,7 @@ class DouyinDownloadTests(unittest.IsolatedAsyncioTestCase):
             (httpx.Response(200, content=b""), "Cookie"),
             (httpx.Response(200, json=[]), "Cookie"),
             (httpx.Response(200, json={"status_code": 0}), "不可用"),
-            (httpx.Response(200, json=detail(images=[{"url_list": []}])), "图集"),
+            (httpx.Response(200, json=detail(images=[], video=None)), "没有可下载"),
             (httpx.Response(200, json=detail(video=None)), "没有可下载"),
             (httpx.Response(200, json=detail(aweme_id="wrong")), "不匹配"),
         ]

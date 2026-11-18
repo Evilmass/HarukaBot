@@ -24,6 +24,8 @@ from haruka_bot.video.models import DownloadedVideo, VideoError, VideoSettings
 from haruka_bot.video.service import VideoService, allowed_platforms, message_candidates
 
 MP4 = b"\x00\x00\x00\x18ftypisom" + b"video" * 20
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"image" * 12
+PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"image" * 12
 
 
 def event(text, group_id=123, user_id=42, message=None):
@@ -36,6 +38,13 @@ def event(text, group_id=123, user_id=42, message=None):
 
 def video(path, platform="douyin"):
     return DownloadedVideo(platform, "123", "标题", "作者", 65, "https://www.douyin.com/video/123", path)
+
+
+def album(paths, platform="douyin"):
+    return DownloadedVideo(
+        platform, "123", "标题", "作者", 0,
+        "https://www.douyin.com/note/123", paths[0], image_paths=tuple(paths),
+    )
 
 
 def group_event(group_id=123):
@@ -197,6 +206,32 @@ class VideoFileTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException):
             await self.store.serve(task_id)
 
+    async def test_registered_images_are_served_with_their_media_type(self):
+        task_id = self.store.create("douyin")
+        directory = self.store.jobs[task_id].directory
+        path = directory / "image-001.jpg"
+        path.write_bytes(JPEG)
+        with self.assertRaises(HTTPException):
+            await self.store.serve(task_id, "image-001.jpg")
+        unsafe = directory / "unsafe name.jpg"
+        unsafe.write_bytes(JPEG)
+        with self.assertRaises(VideoError):
+            self.store.register_image(task_id, unsafe)
+        relative = self.store.register_image(task_id, path)
+        app = FastAPI()
+        app.add_api_route(
+            f"{VIDEO_SERVE_PREFIX}/{{task_id}}/{{filename}}", self.store.serve,
+            methods=["GET", "HEAD"],
+        )
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://bot.example") as client:
+            response = await client.get(relative)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["content-type"], "image/jpeg")
+            self.assertNotIn("content-disposition", response.headers)
+            self.assertEqual(response.content, JPEG)
+            self.assertEqual((await client.get(f"{VIDEO_SERVE_PREFIX}/{task_id}/image-002.png")).status_code, 404)
+            self.assertEqual((await client.get(f"{VIDEO_SERVE_PREFIX}/unknown/image-001.jpg")).status_code, 404)
+
     async def test_path_escape_and_unregistered_files_are_rejected(self):
         task_id = self.store.create("bilibili")
         outside = Path(self.directory.name).parent / "outside-video.mp4"
@@ -250,6 +285,44 @@ class VideoCacheTests(unittest.TestCase):
         self.assertEqual(cached.path.name, "video.mp4")
         self.assertIsNone(self.cache.lookup("bilibili", ("BV1xx411c7mD", 2)))
         self.assertIsNone(self.cache.lookup("douyin", key))
+
+    def test_album_roundtrip_keeps_order_and_metadata(self):
+        directory = Path(self.directory.name)
+        first = directory / "source-a.jpg"
+        second = directory / "source-b.png"
+        first.write_bytes(JPEG)
+        second.write_bytes(PNG)
+        item = album([first, second])
+        key = ("123", 1)
+        self.cache.save(item, "douyin", key)
+        first.unlink()
+        second.unlink()
+        cached = self.cache.lookup("douyin", key)
+        self.assertIsNotNone(cached)
+        self.assertTrue(cached.is_album)
+        self.assertEqual(
+            [path.name for path in cached.image_paths],
+            ["image-001.jpg", "image-002.png"],
+        )
+        self.assertEqual(cached.image_paths[0].read_bytes(), JPEG)
+        self.assertEqual(cached.image_paths[1].read_bytes(), PNG)
+        self.assertEqual(cached.description, item.description)
+        self.assertEqual(cached.path, cached.image_paths[0])
+
+    def test_album_meta_with_unsafe_names_is_discarded(self):
+        directory = Path(self.directory.name)
+        source = directory / "source.jpg"
+        source.write_bytes(JPEG)
+        item = album([source])
+        key = ("123", 1)
+        self.cache.save(item, "douyin", key)
+        entry = self.root / "douyin" / "123-p1"
+        meta_path = entry / "meta.json"
+        meta = json.loads(meta_path.read_text("utf-8"))
+        meta["files"] = ["../../escape.jpg"]
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        self.assertIsNone(self.cache.lookup("douyin", key))
+        self.assertFalse(entry.exists())
 
     def test_expired_or_tampered_entries_are_discarded(self):
         video = self._video()
@@ -306,6 +379,18 @@ class FakeProvider:
         self.downloads.append((self.platform, reference.key, path))
         await asyncio.sleep(0)
         return video(path, self.platform)
+
+
+class AlbumProvider(FakeProvider):
+    async def download(self, reference, directory):
+        paths = []
+        for index in (1, 2):
+            path = directory / f"image-{index:03d}.jpg"
+            path.write_bytes(JPEG)
+            paths.append(path)
+        self.downloads.append((self.platform, reference.key, paths))
+        await asyncio.sleep(0)
+        return album(paths, self.platform)
 
 
 class VideoServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -389,6 +474,57 @@ class VideoServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(self.downloads), 1)
         self.assertEqual(self.bot.send_group_forward_msg.await_count, 2)
+
+    async def test_album_is_sent_as_images_and_reused_from_cache(self):
+        provider = AlbumProvider("douyin", self.downloads)
+        with patch.object(self.service, "_provider", return_value=provider):
+            await self.service.handle(self.bot, event("https://www.douyin.com/note/123", 123))
+            self.assertEqual(len(self.downloads), 1)
+            nodes = self.bot.send_group_forward_msg.await_args.kwargs["messages"]
+            self.assertEqual(len(nodes), 3)
+            self.assertIn("图集：2 张", nodes[0]["data"]["content"])
+            self.assertIn("note/123", nodes[0]["data"]["content"])
+            self.assertEqual(nodes[1]["data"]["content"][0].type, "image")
+            self.assertEqual(nodes[2]["data"]["content"][0].type, "image")
+            self.assertIn(
+                "http://bot.example/haruka/video/files/",
+                nodes[1]["data"]["content"][0].data["file"],
+            )
+            job = next(iter(self.service.store.jobs.values()))
+            self.assertEqual(sorted(job.images), ["image-001.jpg", "image-002.jpg"])
+            self.assertTrue(all(path.is_file() for path in job.images.values()))
+
+            await self.service.handle(self.bot, event("https://www.douyin.com/note/123", 456))
+        self.assertEqual(len(self.downloads), 1)
+        self.assertEqual(self.bot.send_group_forward_msg.await_count, 2)
+        jobs = list(self.service.store.jobs.values())
+        self.assertEqual(len(jobs), 2)
+        self.assertTrue(all(sorted(job.images) == ["image-001.jpg", "image-002.jpg"] for job in jobs))
+        self.assertTrue(all(
+            path.read_bytes() == JPEG for job in jobs for path in job.images.values()
+        ))
+        cache_entry = Path(self.directory.name) / "video" / "cache" / "douyin" / "123-p1"
+        self.assertEqual(
+            sorted(path.name for path in cache_entry.iterdir()),
+            ["image-001.jpg", "image-002.jpg", "meta.json"],
+        )
+
+    async def test_oversized_album_is_rejected_before_sending(self):
+        self.service.settings = VideoSettings("http://bot.example", 1, 3, 2, "ffmpeg", 30)
+        provider = AlbumProvider("douyin", self.downloads)
+        async def oversized(reference, directory):
+            paths = []
+            for index in (1, 2):
+                path = directory / f"image-{index:03d}.jpg"
+                path.write_bytes(JPEG + b"x" * (900 * 1024))
+                paths.append(path)
+            return album(paths)
+        provider.download = oversized
+        with patch.object(self.service, "_provider", return_value=provider):
+            await self.service.handle(self.bot, event("https://www.douyin.com/note/123"))
+        self.bot.send_group_forward_msg.assert_not_awaited()
+        self.assertFalse(self.service.store.jobs)
+        self.assertIn("图集超过 1 MB", self.bot.send_group_msg.await_args.kwargs["message"])
 
     async def test_expired_cache_is_removed_and_video_redownloaded(self):
         url = "https://www.douyin.com/video/123"

@@ -26,7 +26,7 @@ async def handle_video(bot: Bot, event: GroupMessageEvent):
 app = nonebot.get_app()
 if not getattr(app.state, "haruka_video_serve_registered", False):
     app.add_api_route(
-        f"{VIDEO_SERVE_PREFIX}/{{task_id}}/video.mp4", video_service.store.serve,
+        f"{VIDEO_SERVE_PREFIX}/{{task_id}}/{{filename}}", video_service.store.serve,
         methods=["GET", "HEAD"], include_in_schema=False,
     )
     app.state.haruka_video_serve_registered = True

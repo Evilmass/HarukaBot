@@ -1,4 +1,4 @@
-"""B 站和抖音共用的视频下载服务。"""
+"""B 站和抖音共用的视频与图集下载服务。"""
 
 from .models import DownloadedVideo, VideoError, VideoSettings
 

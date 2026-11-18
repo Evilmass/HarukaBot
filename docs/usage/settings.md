@@ -219,20 +219,20 @@ HARUKA_BILI_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 | 配置 | 生效默认值 | 说明 |
 | --- | --- | --- |
 | `HARUKA_VIDEO_PUBLIC_BASE_URL` | 未配置 | NapCat 能访问的 HarukaBot 地址 |
-| `HARUKA_VIDEO_MAX_SIZE_MB` | 90 | 单个作品大小上限，单位 MiB，超限拒绝发送 |
+| `HARUKA_VIDEO_MAX_SIZE_MB` | 90 | 单个视频或图集图片合计大小上限，单位 MiB，超限拒绝发送 |
 | `HARUKA_VIDEO_MAX_LINKS` | 3 | 每条消息两平台合计最多处理的作品数 |
 | `HARUKA_VIDEO_CONCURRENCY` | 2 | 两平台共享的解析、下载和发送并发数 |
 | `HARUKA_VIDEO_FFMPEG` | ffmpeg | B 站 DASH 合并使用的 FFmpeg 路径 |
 | `HARUKA_VIDEO_TIMEOUT` | 600 | 单个作品从解析到发送完成的总超时，单位秒 |
-| `HARUKA_VIDEO_CACHE_ENABLED` | True | 是否复用已下载的视频文件 |
-| `HARUKA_VIDEO_CACHE_DAYS` | 7 | 视频文件保留天数，超过后重新下载 |
+| `HARUKA_VIDEO_CACHE_ENABLED` | True | 是否复用已下载的视频或图集 |
+| `HARUKA_VIDEO_CACHE_DAYS` | 7 | 视频或图集文件保留天数，超过后重新下载 |
 
 文件仅通过已登记任务的临时 HTTP 地址开放，发送后保留 300 秒。
 失败及取消的任务立即清理，活跃任务不参与残留目录清理。
 消息中的 B 站短链若指向直播间、动态、番剧等非视频页面，会被静默忽略，
 不会发送处理提示，也不计入 `HARUKA_VIDEO_MAX_LINKS`。
 
-下载成功的视频会缓存在 `HARUKA_DIR/video/cache` 下，按平台和作品分别保存。
+下载成功的视频或图集会缓存在 `HARUKA_DIR/video/cache` 下，按平台和作品分别保存。
 保留期内再次收到同一作品时，直接使用缓存文件发送合并转发消息，
 不再请求解析接口或重新下载；相同作品的并发请求只会实际下载一次。
 过期缓存和异常退出留下的不完整目录会在启动及运行期间自动清理。
@@ -296,9 +296,13 @@ HARUKA_DOUYIN_VIDEO_COOKIE_FILE=douyin_cookies.txt
 HARUKA_VIDEO_PUBLIC_BASE_URL=http://192.168.31.131:7070
 ```
 
-复制抖音分享文本或发送作品链接后，会下载视频并回传合并转发消息。
-支持 `v.douyin.com`、`jx.douyin.com`、桌面端、移动端和精选链接。
-图集、作者订阅、直播和私聊不在支持范围内。
+复制抖音分享文本或发送作品链接后，会下载视频或图集图片并回传合并转发消息。
+视频以“作品说明＋视频”两个节点发送，图集按“作品说明＋每张图片一个节点”发送。
+支持 `v.douyin.com`、`jx.douyin.com`、桌面端、移动端和精选链接，以及
+`douyin.com/note/...` 形式的图文作品。作者订阅、直播和私聊不在支持范围内。
+
+图集最多处理 35 张图片，单张图片和图片合计大小受 `HARUKA_VIDEO_MAX_SIZE_MB`
+限制；个别图片下载失败时会跳过，发送其余成功下载的图片。
 
 默认 Cookie 文件不存在时仍会尝试请求。配置了自定义路径但文件不存在、
 文件格式错误或无读取权限时，会给出配置错误提示。Cookie 文件必须为 Netscape

@@ -57,32 +57,52 @@ def message_candidates(event: GroupMessageEvent, platforms: Set[str]) -> List[Tu
     return list(dict.fromkeys(candidates))
 
 
-async def send_video(
-    bot: Bot, event: GroupMessageEvent, video: DownloadedVideo,
+def media_label(media: DownloadedVideo) -> str:
+    return f"{PLATFORM_NAMES[media.platform]}{'图集' if media.is_album else '视频'}"
+
+
+async def send_media(
+    bot: Bot, event: GroupMessageEvent, media: DownloadedVideo,
     store: VideoFileStore, task_id: str, settings: VideoSettings,
 ) -> None:
     if not settings.public_base_url:
         raise VideoError("未配置 HARUKA_VIDEO_PUBLIC_BASE_URL 或旧的 B 站公开地址")
-    size = video.path.stat().st_size
-    if not size:
-        raise VideoError("下载的视频文件为空")
-    if size > settings.max_bytes:
-        raise VideoTooLarge(f"视频文件超过 {settings.max_size_mb} MB 限制")
-    relative = store.register(task_id, video.path)
-    video_url = f"{settings.public_base_url.rstrip('/')}{relative}"
-    logger.info(
-        f"[{PLATFORM_NAMES[video.platform]}视频][{video.video_id}] "
-        f"开始发送合并转发：{size / 1024 / 1024:.1f} MB"
-    )
-    nodes = [
-        {"type": "node", "data": {
-            "name": "HarukaBot", "uin": bot.self_id, "content": video.description,
-        }},
-        {"type": "node", "data": {
+    base = settings.public_base_url.rstrip("/")
+    descriptor = {"type": "node", "data": {
+        "name": "HarukaBot", "uin": bot.self_id, "content": media.description,
+    }}
+    if media.is_album:
+        sizes = [path.stat().st_size for path in media.image_paths]
+        if not all(sizes):
+            raise VideoError("下载的图片文件为空")
+        if sum(sizes) > settings.max_bytes:
+            raise VideoTooLarge(f"图集超过 {settings.max_size_mb} MB 限制")
+        nodes = [descriptor]
+        for path in media.image_paths:
+            relative = store.register_image(task_id, path)
+            nodes.append({"type": "node", "data": {
+                "name": "HarukaBot", "uin": bot.self_id,
+                "content": Message(MessageSegment.image(f"{base}{relative}")),
+            }})
+        logger.info(
+            f"[{media_label(media)}][{media.video_id}] "
+            f"开始发送合并转发：{len(media.image_paths)} 张图片"
+        )
+    else:
+        size = media.path.stat().st_size
+        if not size:
+            raise VideoError("下载的视频文件为空")
+        if size > settings.max_bytes:
+            raise VideoTooLarge(f"视频文件超过 {settings.max_size_mb} MB 限制")
+        relative = store.register(task_id, media.path)
+        nodes = [descriptor, {"type": "node", "data": {
             "name": "HarukaBot", "uin": bot.self_id,
-            "content": Message(MessageSegment.video(video_url)),
-        }},
-    ]
+            "content": Message(MessageSegment.video(f"{base}{relative}")),
+        }}]
+        logger.info(
+            f"[{media_label(media)}][{media.video_id}] "
+            f"开始发送合并转发：{size / 1024 / 1024:.1f} MB"
+        )
     await bot.send_group_forward_msg(
         group_id=event.group_id, messages=nodes, _timeout=settings.timeout,
     )
@@ -133,16 +153,25 @@ class VideoService:
             if entry[1] == 0 and self.key_locks.get(key) is entry:
                 del self.key_locks[key]
 
+    def _copy_media(self, media: DownloadedVideo, directory: Path) -> DownloadedVideo:
+        """从缓存复制到独立任务目录，发送后按任务清理互不影响。"""
+        if media.is_album:
+            images = []
+            for index, source in enumerate(media.image_paths, 1):
+                target = directory / f"image-{index:03d}{source.suffix.lower()}"
+                link_or_copy(source, target)
+                images.append(target)
+            return replace(media, path=images[0], image_paths=tuple(images))
+        target = directory / "video.mp4"
+        link_or_copy(media.path, target)
+        return replace(media, path=target)
+
     async def _send_cached(self, platform, cached, bot, event) -> None:
         task_id = self.store.create(platform)
         job = self.store.jobs[task_id]
         try:
-            target = job.directory / "video.mp4"
-            link_or_copy(cached.path, target)
-            await send_video(
-                bot, event, replace(cached, path=target), self.store, task_id,
-                self.settings,
-            )
+            media = self._copy_media(cached, job.directory)
+            await send_media(bot, event, media, self.store, task_id, self.settings)
         except BaseException:
             self.store.remove(task_id)
             raise
@@ -155,21 +184,24 @@ class VideoService:
         job = self.store.jobs[task_id]
         succeeded = False
         try:
-            video = await provider.download(reference, job.directory)
-            await send_video(bot, event, video, self.store, task_id, self.settings)
+            media = await provider.download(reference, job.directory)
+            await send_media(bot, event, media, self.store, task_id, self.settings)
             succeeded = True
             try:
-                self.cache.save(video, platform, reference.key)
+                self.cache.save(media, platform, reference.key)
             except Exception as error:
                 logger.warning(f"[视频缓存] 写入失败：{type(error).__name__}")
-            # 最终 MP4 已登记；原始 DASH 流不需要在保留期间继续占用空间。
+            # 最终文件已登记；原始下载流不需要在保留期间继续占用空间。
+            media_paths = {path.resolve() for path in media.media_paths}
             for path in job.directory.iterdir():
-                if path != video.path and path.is_file():
+                if path.is_file() and path.resolve() not in media_paths:
                     try:
                         path.unlink()
                     except OSError:
                         logger.warning("[视频下载] 原始流清理失败，将随任务目录延迟清理")
-            logger.info(f"[{PLATFORM_NAMES[platform]}视频][{video.video_id}] 下载及合并转发完成")
+            logger.info(
+                f"[{media_label(media)}][{media.video_id}] 下载及合并转发完成"
+            )
         finally:
             if succeeded:
                 self.store.release(task_id)
@@ -187,7 +219,7 @@ class VideoService:
             if cached is not None:
                 await self._send_cached(platform, cached, bot, event)
                 logger.info(
-                    f"[{PLATFORM_NAMES[platform]}视频][{cached.video_id}] "
+                    f"[{media_label(cached)}][{cached.video_id}] "
                     "使用缓存转发，跳过下载"
                 )
                 return True
@@ -234,12 +266,12 @@ class VideoService:
                                 provider.resolve(url), timeout=self.settings.timeout,
                             )
                             if reference is None:
-                                # 直播间、动态等非视频链接直接跳过，不占用处理数量上限。
-                                logger.debug(f"[{name}视频] 链接不是视频作品，已忽略：{url}")
+                                # 直播间、动态等非作品链接直接跳过，不占用处理数量上限。
+                                logger.debug(f"[{name}] 链接不是可解析作品，已忽略：{url}")
                                 continue
                             if not notified:
                                 notified = True
-                                await self._notify(bot, event, "检测到视频链接，正在处理……")
+                                await self._notify(bot, event, "检测到作品链接，正在处理……")
                             consumed = await asyncio.wait_for(
                                 self._process(
                                     provider, platform, reference, bot, event, seen,
@@ -249,14 +281,14 @@ class VideoService:
                             processed += int(consumed)
                     except VideoError as error:
                         processed += 1
-                        await self._notify(bot, event, f"{name}视频处理失败：{error}")
+                        await self._notify(bot, event, f"{name}作品处理失败：{error}")
                     except (NetworkError, asyncio.TimeoutError):
                         processed += 1
-                        await self._notify(bot, event, f"{name}视频处理或发送超时，请稍后重试")
+                        await self._notify(bot, event, f"{name}作品处理或发送超时，请稍后重试")
                     except Exception as error:
                         processed += 1
-                        logger.warning(f"[{name}视频] 处理失败：{type(error).__name__}")
-                        await self._notify(bot, event, f"{name}视频处理或发送失败，请稍后重试")
+                        logger.warning(f"[{name}] 处理失败：{type(error).__name__}")
+                        await self._notify(bot, event, f"{name}作品处理或发送失败，请稍后重试")
         finally:
             self.handlers.discard(current)
 
@@ -296,7 +328,7 @@ async def send_bili_video(bot, event, info, path: Path) -> None:
     target = video_service.store.jobs[task_id].directory / "video.mp4"
     try:
         shutil.copyfile(path, target)
-        await send_video(
+        await send_media(
             bot, event, bilibili.as_downloaded(info, target), video_service.store,
             task_id, VideoSettings.from_config(),
         )

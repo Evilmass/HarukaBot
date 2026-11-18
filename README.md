@@ -58,8 +58,9 @@ ws://127.0.0.1:7070/onebot/v11/ws
 `bilibili.com/video/...`、`b23.tv/...`、`b23.wtf/...` 和
 `bili2233.cn/...` 视频链接，下载最高不超过配置清晰度的 DASH 视频、音频流，
 通过 FFmpeg 合并为 MP4。抖音支持复制分享文本、`v.douyin.com`、
-`jx.douyin.com` 短链，以及桌面端、移动端和精选的视频作品链接，直接下载 MP4。
-两个平台均通过合并转发消息发送作品说明和视频。B 站最高画质超过文件大小
+`jx.douyin.com` 短链，以及桌面端、移动端和精选的视频作品与图集链接，视频直接
+下载 MP4，图集下载原图。两个平台均通过合并转发消息发送作品说明和视频；
+抖音图集按“作品说明＋多张图片”发送。B 站最高画质超过文件大小
 限制时会逐档降低清晰度；仍然超限时拒绝发送，不进行压缩或上传群文件。
 B 站短链指向直播间、动态、番剧等非视频页面时会被静默忽略，不发送处理提示。
 
@@ -88,7 +89,6 @@ HARUKA_DOUYIN_VIDEO_COOKIE_FILE=douyin_cookies.txt
 # 仅启用视频解析的群（等价于给该群配置 ["video"]）
 HARUKA_VIDEO_ONLY_GROUPS=[]
 # 按群启用功能：{"群号": ["功能", ...]}；未列出的群保留全部功能
-# 显式启用 video 且未配置平台白名单时，默认解析 B 站和抖音
 # 可用功能：video, save_sticker, sub, live, dynamic, at, permission,
 #           live_duration, help, server_ip, maintenance，或 all
 # 示例：{"123456789": ["video", "save_sticker"], "987654321": "all"}
@@ -101,7 +101,7 @@ HARUKA_VIDEO_MAX_LINKS=3
 HARUKA_VIDEO_CONCURRENCY=2
 HARUKA_VIDEO_FFMPEG=ffmpeg
 HARUKA_VIDEO_TIMEOUT=600
-# 下载成功的视频按作品缓存；保留期内直接复用，不再解析或下载
+# 下载成功的视频或图集按作品缓存；保留期内直接复用，不再解析或下载
 HARUKA_VIDEO_CACHE_ENABLED=True
 HARUKA_VIDEO_CACHE_DAYS=7
 ```
@@ -120,10 +120,11 @@ HARUKA_GROUP_FEATURES={"123456789": ["video", "save_sticker"]}
 `HARUKA_DOUYIN_VIDEO_GROUPS` 中，则只解析对应平台。
 
 宿主机运行时需安装 `ffmpeg` 并确保它在 `PATH` 中；Docker 镜像已内置。
-HarukaBot 会通过临时 HTTP 地址让 NapCat 获取视频，以“作品说明＋视频”两个
-节点发送合并转发消息。公开地址必须填写 NapCat 能访问的 HarukaBot 地址。
+HarukaBot 会通过临时 HTTP 地址让 NapCat 获取视频或图集图片，以
+“作品说明＋视频”或“作品说明＋多张图片”的节点发送合并转发消息。
+公开地址必须填写 NapCat 能访问的 HarukaBot 地址。
 每次任务使用随机 ID，发送完成后文件保留 300 秒，然后地址失效；不同群或不同
-分 P 的任务分别存储，互不覆盖。下载成功的视频会缓存在 `HARUKA_DIR/video/cache`
+分 P 的任务分别存储，互不覆盖。下载成功的视频或图集会缓存在 `HARUKA_DIR/video/cache`
 下，保留期内再次收到同一作品时直接转发缓存文件，不再请求解析接口或重新下载，
 同一作品的并发请求只会实际下载一次。缓存默认保留 7 天，过期或异常退出留下的
 不完整目录会自动清理。
@@ -131,7 +132,9 @@ HarukaBot 会通过临时 HTTP 地址让 NapCat 获取视频，以“作品说�
 `HARUKA_VIDEO_MAX_LINKS` 限制一条消息中两个平台合计处理的作品数，
 `HARUKA_VIDEO_CONCURRENCY` 限制两个平台共享的并发数，
 `HARUKA_VIDEO_TIMEOUT` 限制单个作品从解析到发送完成的总时间。
-抖音仅支持视频，不支持图集、作者订阅或直播。Cookie 可不配置，接口受限时
+抖音支持视频和图集：图集最多处理 35 张图片，单张图片和图片合计大小同样受
+`HARUKA_VIDEO_MAX_SIZE_MB` 限制，个别图片下载失败时会跳过并发送其余图片。
+作者订阅和直播不在支持范围内。Cookie 可不配置，接口受限时
 需提供有效 Cookie；凭据仅用于平台请求，不会转发给媒体 CDN 或写入日志。
 实现参考 [nonebot-plugin-ifollow](https://github.com/ByteColtX/nonebot-plugin-ifollow)，
 无需安装该插件或升级当前依赖。

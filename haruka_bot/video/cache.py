@@ -1,4 +1,4 @@
-"""已下载视频的短期缓存，避免同一作品重复解析与下载。"""
+"""已下载视频与图集的短期缓存，避免同一作品重复解析与下载。"""
 
 import hashlib
 import json
@@ -9,13 +9,29 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
-from .models import DownloadedVideo, VideoError
+from .models import IMAGE_NAME_RE, IMAGE_SUFFIXES, DownloadedVideo, VideoError
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 PLATFORMS = {"bilibili", "douyin"}
+VIDEO_FILE = "video.mp4"
 _UNSAFE_NAME = re.compile(r"[^0-9A-Za-z_-]+")
+
+
+def _image_suffix(path: Path) -> str:
+    suffix = path.suffix.lower()
+    return suffix if suffix in IMAGE_SUFFIXES else ".jpg"
+
+
+def _cache_files(video: DownloadedVideo) -> List[Tuple[str, Path]]:
+    """缓存内统一使用 video.mp4 或 image-001.jpg 形式的文件名。"""
+    if not video.image_paths:
+        return [(VIDEO_FILE, video.path)]
+    return [
+        (f"image-{index:03d}{_image_suffix(path)}", path)
+        for index, path in enumerate(video.image_paths, 1)
+    ]
 
 
 def link_or_copy(source: Path, target: Path) -> None:
@@ -55,34 +71,62 @@ class VideoCache:
             return
         shutil.rmtree(entry, ignore_errors=True)
 
+    @staticmethod
+    def _load_meta(entry: Path, platform: str) -> Optional[dict]:
+        try:
+            meta = json.loads((entry / "meta.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(meta, dict):
+            return None
+        created = meta.get("created_at")
+        if (
+            not isinstance(created, (int, float))
+            or not math.isfinite(created)
+            or meta.get("version") != CACHE_VERSION
+            or meta.get("platform") != platform
+        ):
+            return None
+        return meta
+
+    @staticmethod
+    def _media_names(meta: dict) -> Optional[List[str]]:
+        """校验缓存记录的文件名，避免通过元数据访问条目目录之外的文件。"""
+        names = meta.get("files")
+        kind = meta.get("kind")
+        if not isinstance(names, list) or not names:
+            return None
+        if kind == "video":
+            return [VIDEO_FILE] if names == [VIDEO_FILE] else None
+        if kind != "images" or not all(
+            isinstance(name, str) and IMAGE_NAME_RE.fullmatch(name) for name in names
+        ):
+            return None
+        return names
+
     def lookup(self, platform: str, key: Tuple[str, int]) -> Optional[DownloadedVideo]:
         if not self.enabled:
             return None
         entry = self._entry(platform, key)
         if not self._inside(entry):
             return None
-        try:
-            meta = json.loads((entry / "meta.json").read_text("utf-8"))
-        except (OSError, ValueError):
+        meta = self._load_meta(entry, platform)
+        if meta is None:
             self._remove(entry)
             return None
-        if not isinstance(meta, dict):
-            self._remove(entry)
-            return None
-        created = meta.get("created_at")
         if (
-            not isinstance(created, (int, float))
-            or not math.isfinite(created)
-            or time.time() - created > self.ttl
-            or meta.get("version") != CACHE_VERSION
-            or meta.get("platform") != platform
-            or meta.get("key") != [str(key[0]), int(key[1])]
+            meta.get("key") != [str(key[0]), int(key[1])]
+            or time.time() - meta["created_at"] > self.ttl
         ):
             self._remove(entry)
             return None
-        video_path = entry / "video.mp4"
+        names = self._media_names(meta)
+        if names is None:
+            self._remove(entry)
+            return None
+        paths = [entry / name for name in names]
         try:
-            if not video_path.is_file() or not video_path.stat().st_size:
+            if not all(path.is_file() and path.stat().st_size for path in paths):
                 raise OSError
             return DownloadedVideo(
                 platform=platform,
@@ -91,10 +135,11 @@ class VideoCache:
                 author=str(meta["author"]),
                 duration=max(int(meta.get("duration", 0)), 0),
                 canonical_url=str(meta["canonical_url"]),
-                path=video_path,
+                path=paths[0],
                 part_label=(
                     str(meta["part_label"]) if meta.get("part_label") else None
                 ),
+                image_paths=tuple(paths) if meta.get("kind") == "images" else (),
             )
         except (KeyError, TypeError, ValueError, OSError):
             self._remove(entry)
@@ -103,23 +148,29 @@ class VideoCache:
     def save(self, video: DownloadedVideo, platform: str, key: Tuple[str, int]) -> None:
         if not self.enabled:
             return
-        source = video.path.resolve()
-        if not source.is_file() or not source.stat().st_size:
-            raise VideoError("没有可缓存的视频文件")
+        files = _cache_files(video)
+        for _, source in files:
+            if not source.is_file() or not source.stat().st_size:
+                raise VideoError("没有可缓存的媒体文件")
         entry = self._entry(platform, key)
         if not self._inside(entry):
             raise VideoError("视频缓存目录不合法")
         entry.mkdir(parents=True, exist_ok=True)
-        target = entry / "video.mp4"
-        temp_video = entry / f".video-{uuid.uuid4().hex}.tmp"
+        staged: List[Tuple[Path, Path]] = []
         temp_meta = entry / f".meta-{uuid.uuid4().hex}.tmp"
         try:
-            link_or_copy(source, temp_video)
-            os.replace(temp_video, target)
+            for name, source in files:
+                temp = entry / f".{uuid.uuid4().hex}.tmp"
+                link_or_copy(source, temp)
+                staged.append((temp, entry / name))
+            for temp, target in staged:
+                os.replace(temp, target)
             meta = {
                 "version": CACHE_VERSION,
                 "platform": platform,
                 "key": [str(key[0]), int(key[1])],
+                "kind": "images" if video.image_paths else "video",
+                "files": [name for name, _ in files],
                 "video_id": video.video_id,
                 "title": video.title,
                 "author": video.author,
@@ -132,8 +183,21 @@ class VideoCache:
                 json.dumps(meta, ensure_ascii=False), encoding="utf-8"
             )
             os.replace(temp_meta, entry / "meta.json")
+            # 作品从视频变为图集（或图片数量减少）时移除旧文件。
+            keep = {name for name, _ in files} | {"meta.json"}
+            for child in entry.iterdir():
+                if (
+                    child.is_file()
+                    and child.name not in keep
+                    and (
+                        child.name == VIDEO_FILE
+                        or IMAGE_NAME_RE.fullmatch(child.name)
+                    )
+                ):
+                    child.unlink(missing_ok=True)
         except BaseException:
-            temp_video.unlink(missing_ok=True)
+            for temp, _ in staged:
+                temp.unlink(missing_ok=True)
             temp_meta.unlink(missing_ok=True)
             raise
 
@@ -153,22 +217,17 @@ class VideoCache:
             for entry in entries:
                 if entry.is_symlink() or not entry.is_dir():
                     continue
-                try:
-                    meta = json.loads((entry / "meta.json").read_text("utf-8"))
-                    created = float(meta["created_at"])
-                    valid = (
-                        isinstance(meta, dict)
-                        and math.isfinite(created)
-                        and meta.get("version") == CACHE_VERSION
-                        and meta.get("platform") == platform
-                        and (entry / "video.mp4").is_file()
-                    )
-                except (OSError, ValueError, KeyError, TypeError):
-                    valid, created = False, None
-                if valid:
-                    if now - created > self.ttl:
-                        self._remove(entry)
-                    continue
+                meta = self._load_meta(entry, platform)
+                names = self._media_names(meta) if meta is not None else None
+                if names is not None:
+                    try:
+                        complete = all((entry / name).is_file() for name in names)
+                    except OSError:
+                        complete = False
+                    if complete:
+                        if now - float(meta["created_at"]) > self.ttl:
+                            self._remove(entry)
+                        continue
                 try:
                     # 给正在写入的目录留出余量，避免与保存流程冲突。
                     age = now - entry.stat().st_mtime
