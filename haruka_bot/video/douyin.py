@@ -28,6 +28,8 @@ DOUYIN_URL_RE = re.compile(
 )
 TRAILING_URL_CHARS = ".,;:!?，。；：！？)]}）】》\"'"
 MAX_ALBUM_IMAGES = 35
+# 图集图片并发下载数，避免几十张图逐张串行等待，又不至于压垮 CDN。
+ALBUM_CONCURRENCY = 4
 MEDIA_HEADERS = {"Referer": "https://www.douyin.com/", "Accept-Encoding": "identity"}
 IMAGE_HEADERS = {
     **MEDIA_HEADERS, "Accept": "image/jpeg,image/png,image/webp,image/gif",
@@ -248,43 +250,54 @@ class DouyinVideoProvider:
     async def _download_album(
         self, detail: Dict[str, Any], reference: DouyinReference, directory: Path,
     ) -> DownloadedVideo:
-        """图集逐张下载，个别图片失败时跳过，保留其余可发送的图片。"""
+        """图集并发下载并保持原顺序，个别图片失败时跳过，保留其余可发送的图片。"""
         items = [
             item for item in detail["images"][:MAX_ALBUM_IMAGES] if isinstance(item, dict)
         ]
-        paths: List[Path] = []
+        scope = f"[抖音图集][{reference.aweme_id}]"
+        semaphore = asyncio.Semaphore(ALBUM_CONCURRENCY)
         total = 0
-        for index, item in enumerate(items, 1):
+
+        async def fetch(index: int, item: Dict[str, Any]) -> Optional[Path]:
+            nonlocal total
             urls = _image_urls(item)
             if not urls:
-                logger.warning(
-                    f"[抖音图集][{reference.aweme_id}] 第 {index} 张图片缺少地址，已跳过"
-                )
-                continue
+                logger.warning(f"{scope} 第 {index} 张图片缺少地址，已跳过")
+                return None
             target = directory / f"image-{index:03d}.jpg"
-            for url in urls:
-                try:
-                    total += await download_file(
-                        self.media_client, url, target, self.settings.max_bytes,
-                        IMAGE_HEADERS, require_image=True, label="图片",
-                        scope=f"[抖音图集][{reference.aweme_id}]",
-                    )
-                    target = _rename_by_content(target)
-                    paths.append(target)
-                    break
-                except VideoTooLarge:
-                    raise
-                except (httpx.HTTPError, ValueError, VideoError) as error:
-                    logger.warning(
-                        f"[抖音图集][{reference.aweme_id}] 第 {index} 张图片尝试备用地址："
-                        f"{type(error).__name__}"
-                    )
-            else:
-                logger.warning(
-                    f"[抖音图集][{reference.aweme_id}] 第 {index} 张图片下载失败，已跳过"
-                )
-            if total > self.settings.max_bytes:
-                raise VideoTooLarge(f"图集超过 {self.settings.max_size_mb} MB 限制")
+            async with semaphore:
+                for url in urls:
+                    try:
+                        size = await download_file(
+                            self.media_client, url, target, self.settings.max_bytes,
+                            IMAGE_HEADERS, require_image=True, label="图片", scope=scope,
+                        )
+                    except VideoTooLarge:
+                        raise
+                    except (httpx.HTTPError, ValueError, VideoError) as error:
+                        logger.warning(
+                            f"{scope} 第 {index} 张图片尝试备用地址：{type(error).__name__}"
+                        )
+                        continue
+                    total += size
+                    if total > self.settings.max_bytes:
+                        raise VideoTooLarge(f"图集超过 {self.settings.max_size_mb} MB 限制")
+                    return _rename_by_content(target)
+            logger.warning(f"{scope} 第 {index} 张图片下载失败，已跳过")
+            return None
+
+        tasks = [
+            asyncio.create_task(fetch(index, item)) for index, item in enumerate(items, 1)
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            # 超限或取消时停止其余图片下载，部分文件随任务目录清理。
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        paths = [path for path in results if path is not None]
         if not paths:
             raise VideoError("抖音图集没有可下载的图片，请稍后重试")
         return self._downloaded(detail, reference, paths[0], 0, tuple(paths))

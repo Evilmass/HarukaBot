@@ -28,6 +28,9 @@ SHORT_LINK_DEADLINE = 15.0
 MEDIA_READ_TIMEOUT = 60.0
 # 大小探测只用于选流，失败应尽快降级。
 MEDIA_PROBE_TIMEOUT = httpx.Timeout(15.0, connect=10.0, read=10.0)
+# 单个媒体流探测的总时限（所有候选 CDN 共用），避免逐个镜像超时累加。
+MEDIA_PROBE_DEADLINE = 20.0
+CDN_HOST_RE = re.compile(r"https?://[^/]+\.bilivideo\.(?:com|cn)/")
 # 下载进度日志间隔，便于区分“下载慢”和“发送慢”。
 MEDIA_PROGRESS_INTERVAL = 10 * 1024 * 1024
 # 消息里的链接可能缺少协议头，同时避免匹配到更长域名中的同名片段。
@@ -407,6 +410,8 @@ class BiliVideoDownloader:
         self.settings = VideoSettings.from_config()
         self.max_bytes = self.settings.max_bytes
         self._infos = {}
+        # 主地址 -> 探测成功的 CDN 地址，下载时优先使用，跳过已知不可用的节点。
+        self._preferred_urls: Dict[str, str] = {}
 
     async def _api_get(self, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -528,17 +533,13 @@ class BiliVideoDownloader:
     @staticmethod
     def _replace_cdn_host(url: str, new_host: str) -> str:
         """将 URL 中的 CDN 主机名替换为指定的镜像主机名。"""
-        import re as _re
-
-        return _re.sub(
-            r"https?://[^/]+\.bilivideo\.(?:com|cn)/",
-            f"https://{new_host}/",
-            url,
-            count=1,
-        )
+        return CDN_HOST_RE.sub(f"https://{new_host}/", url, count=1)
 
     def _candidate_urls(self, stream: Dict[str, Any]) -> List[str]:
-        """收集原始地址、镜像与备份地址；mcdn P2P 节点排在最后。"""
+        """收集原始地址、镜像与备份地址；mcdn P2P 节点排在最后。
+
+        大小探测已验证可用的地址排在最前，下载时不必重新试错。
+        """
         urls: List[str] = []
         for url in _stream_urls(stream):
             candidates = [url]
@@ -549,7 +550,12 @@ class BiliVideoDownloader:
             for candidate in candidates:
                 if candidate not in urls:
                     urls.append(candidate)
-        return sorted(urls, key=_is_mcdn_url)
+        urls.sort(key=_is_mcdn_url)
+        preferred = self._preferred_urls.get(_stream_url(stream))
+        if preferred in urls:
+            urls.remove(preferred)
+            urls.insert(0, preferred)
+        return urls
 
     @asynccontextmanager
     async def _media_stream(
@@ -575,25 +581,44 @@ class BiliVideoDownloader:
     async def _probe_stream_size(
         self, stream: Dict[str, Any], referer: str
     ) -> Optional[int]:
-        """通过单字节 Range 请求获取媒体流的完整大小。"""
+        """通过单字节 Range 请求获取媒体流的完整大小，超过总时限视为未知。"""
+        try:
+            return await asyncio.wait_for(
+                self._probe_stream_size_impl(stream, referer),
+                timeout=MEDIA_PROBE_DEADLINE,
+            )
+        except asyncio.TimeoutError:
+            return None
+
+    async def _probe_stream_size_impl(
+        self, stream: Dict[str, Any], referer: str
+    ) -> Optional[int]:
+        primary = _stream_url(stream)
         for attempt_url in self._candidate_urls(stream):
-            try:
-                async with self._media_stream(
-                    attempt_url, "bytes=0-0", referer,
-                    timeout=MEDIA_PROBE_TIMEOUT,
-                ) as response:
-                    response.raise_for_status()
-                    content_range = response.headers.get("content-range", "")
-                    if "/" in content_range:
-                        total = content_range.rsplit("/", 1)[-1]
-                        if total.isdigit():
-                            return int(total)
-                    if response.status_code == 200:
-                        content_length = response.headers.get("content-length")
-                        if content_length and content_length.isdigit():
-                            return int(content_length)
-            except (httpx.HTTPError, OSError, ValueError):
-                continue
+            size = await self._probe_url_size(attempt_url, referer)
+            if size is not None:
+                self._preferred_urls[primary] = attempt_url
+                return size
+        return None
+
+    async def _probe_url_size(self, url: str, referer: str) -> Optional[int]:
+        """探测单个 CDN 地址；失败或无法得知大小时返回 ``None``。"""
+        try:
+            async with self._media_stream(
+                url, "bytes=0-0", referer, timeout=MEDIA_PROBE_TIMEOUT,
+            ) as response:
+                response.raise_for_status()
+                content_range = response.headers.get("content-range", "")
+                if "/" in content_range:
+                    total = content_range.rsplit("/", 1)[-1]
+                    if total.isdigit():
+                        return int(total)
+                if response.status_code == 200:
+                    content_length = response.headers.get("content-length")
+                    if content_length and content_length.isdigit():
+                        return int(content_length)
+        except (httpx.HTTPError, OSError, ValueError, VideoError):
+            pass
         return None
 
     async def _select_fitting_dash_streams(
@@ -606,22 +631,23 @@ class BiliVideoDownloader:
         videos, audio = get_dash_stream_candidates(
             play_data, plugin_config.haruka_bili_video_quality
         )
+        # 音频与各档视频并发探测，总耗时取决于最慢的一次而不是逐个累加。
         probe_started = time.perf_counter()
-        audio_size = await self._probe_stream_size(audio, referer)
-        logger.info(
-            f"[B站视频][{log_id}] 音频流大小探测完成："
-            f"{_format_size(audio_size)}，耗时 "
-            f"{time.perf_counter() - probe_started:.2f} 秒"
+        audio_size, *video_sizes = await asyncio.gather(
+            self._probe_stream_size(audio, referer),
+            *(self._probe_stream_size(video, referer) for video in videos),
         )
-        for index, video in enumerate(videos):
-            probe_started = time.perf_counter()
-            video_size = await self._probe_stream_size(video, referer)
-            quality = video.get("id", "未知")
-            logger.info(
-                f"[B站视频][{log_id}] 视频流大小探测完成："
-                f"清晰度 ID {quality}，{_format_size(video_size)}，耗时 "
-                f"{time.perf_counter() - probe_started:.2f} 秒"
+        logger.info(
+            f"[B站视频][{log_id}] 媒体流大小探测完成：音频 "
+            f"{_format_size(audio_size)}，视频 "
+            + "、".join(
+                f"ID {video.get('id', '未知')}={_format_size(size)}"
+                for video, size in zip(videos, video_sizes)
             )
+            + f"，耗时 {time.perf_counter() - probe_started:.2f} 秒"
+        )
+        for index, (video, video_size) in enumerate(zip(videos, video_sizes)):
+            quality = video.get("id", "未知")
             known_size = (audio_size or 0) + (video_size or 0)
             total_size = (
                 audio_size + video_size
