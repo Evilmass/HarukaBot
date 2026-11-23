@@ -6,6 +6,7 @@ docs/.yarn
 !data/.gitkeep
 data/*cookies*.txt
 data/video/
+data/browser/
 accounts/
 go-cqhttp/
 logs/
